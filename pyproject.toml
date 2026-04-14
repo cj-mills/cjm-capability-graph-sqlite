@@ -1,3 +1,30 @@
 [build-system]
-requires = ["setuptools>=64.0,<76.0"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "cjm-graph-plugin-sqlite"
+dynamic = ["version"]
+description = "A local, file-backed Context Graph worker for the cjm-plugin-system that implements graph storage, traversal, and querying using SQLite."
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "Apache-2.0"}
+authors = [{name = "Christian J. Mills", email = "9126128+cj-mills@users.noreply.github.com"}]
+keywords = ['nbdev', 'jupyter', 'notebook', 'python']
+classifiers = ["Natural Language :: English", "Intended Audience :: Developers", "Development Status :: 3 - Alpha", "Programming Language :: Python :: 3", "Programming Language :: Python :: 3 :: Only"]
+dependencies = ['cjm_graph_plugin_system']
+
+[project.urls]
+Repository = "https://github.com/cj-mills/cjm-graph-plugin-sqlite"
+Documentation = "https://cj-mills.github.io/cjm-graph-plugin-sqlite"
+
+[project.entry-points.nbdev]
+cjm_graph_plugin_sqlite = "cjm_graph_plugin_sqlite._modidx:d"
+
+[tool.setuptools.dynamic]
+version = {attr = "cjm_graph_plugin_sqlite.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["cjm_graph_plugin_sqlite"]
+
+[tool.nbdev]
