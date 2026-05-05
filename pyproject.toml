@@ -25,6 +25,6 @@ cjm_graph_plugin_sqlite = "cjm_graph_plugin_sqlite._modidx:d"
 version = {attr = "cjm_graph_plugin_sqlite.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["cjm_graph_plugin_sqlite"]
+include = ["cjm_graph_plugin_sqlite*"]
 
 [tool.nbdev]
