@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sqlite3
+from cjm_plugin_system.core.errors import PluginInputError
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -303,7 +304,9 @@ class SQLiteGraphPlugin(GraphPlugin):
             return {"status": "not_implemented", "query": str(query)}
 
         else:
-            raise ValueError(f"Unknown action: {action}")
+            raise PluginInputError(  # SG-47: typed input-validation
+                f"Unknown action: {action}", fields_invalid=["action"],
+            )
 
     # -------------------------------------------------------------------------
     # CREATE
