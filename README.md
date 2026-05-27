@@ -21,8 +21,8 @@ Total: 2 notebooks
 
 ``` mermaid
 graph LR
-    meta[meta<br/>Metadata]
-    plugin[plugin<br/>SQLite Graph Plugin]
+    meta["meta<br/>Metadata"]
+    plugin["plugin<br/>SQLite Graph Plugin"]
 
     plugin --> meta
 ```
@@ -144,7 +144,12 @@ class SQLiteGraphPlugin:
             action: str = "get_schema",  # Action to perform
             **kwargs
         ) -> Dict[str, Any]:  # JSON-serializable result
-        "Dispatch to appropriate method based on action."
+        "Dispatch to the `@plugin_action`-tagged handler for `action` (SG-44).
+
+Handlers are discovered by walking the class MRO for methods carrying a
+`_plugin_action` tag (the same source `supported_actions` is built from
+via `collect_plugin_actions`). Replaces the prior hand-maintained
+if/elif chain."
     
     def add_nodes(
             self,
@@ -227,14 +232,32 @@ class SQLiteGraphPlugin:
             self,
             graph_data: GraphContext,  # Data to import
             merge_strategy: str = "overwrite"  # "overwrite", "skip", or "merge"
-        ) -> Dict[str, int]:  # Import statistics {nodes_created, edges_created, ...}
-        "Bulk import a GraphContext (e.g., from backup or another plugin)."
+        ) -> Dict[str, int]:  # Import statistics {nodes_created, edges_created, merge_strategy}
+        "Bulk import a GraphContext honoring merge_strategy (SG-41).
+
+On id-conflict: "skip" keeps the existing row untouched; "overwrite"
+replaces its mutable fields with the incoming values; "merge" unions
+properties (incoming wins per key) and unions node sources by identity.
+Brand-new ids are always inserted. The `nodes_created`/`edges_created`
+counts report rows written (inserted or updated)."
     
     def export_graph(
             self,
             filter_query: Optional[GraphQuery] = None  # Optional filter
         ) -> GraphContext:  # Exported subgraph or full graph
         "Export the entire graph or a filtered subset."
+    
+    def query(
+            self,
+            sql: str,  # A single read-only SELECT (or WITH ... SELECT) statement
+            params: Optional[List[Any]] = None  # Bound parameters for the statement
+        ) -> Dict[str, Any]:  # {"columns": [...], "rows": [[...]], "row_count": int}
+        "Execute a single read-only SELECT and return its rows (SG-41).
+
+Guards reject empty input, multiple statements, and anything not starting
+with SELECT/WITH. The statement runs on a fresh read-only connection
+(URI `mode=ro`), so even a query that slips past the prefix guard cannot
+mutate the database. Bound `params` use SQLite's qmark placeholders."
     
     def cleanup(self) -> None
         "Clean up resources."

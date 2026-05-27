@@ -13,6 +13,7 @@ import logging
 import os
 import sqlite3
 from cjm_plugin_system.core.errors import PluginInputError
+from cjm_plugin_system.core.interface import plugin_action, collect_plugin_actions
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -90,11 +91,14 @@ class SQLiteGraphPlugin(GraphPlugin):
         self._db_path = self.config.db_path if self.config.db_path else meta_path
 
         self.logger.info(f"Initializing SQLite Graph at: {self._db_path}")
-        self._init_db()
+        # SG-41: a read-only graph must pre-exist; skip schema creation (the
+        # read-only connection cannot run CREATE TABLE).
+        if not self.config.readonly:
+            self._init_db()
 
     def _init_db(self) -> None:
         """Create tables and indices."""
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             # Enable Foreign Keys
             con.execute("PRAGMA foreign_keys = ON;")
 
@@ -128,6 +132,22 @@ class SQLiteGraphPlugin(GraphPlugin):
             con.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);")
             con.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);")
             con.execute("CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(relation_type);")
+
+    def _connect(self) -> sqlite3.Connection:  # Open DB connection (honors readonly; sets WAL + FKs)
+        """Open a SQLite connection honoring the `readonly` config (SG-41).
+
+        Read-only config opens the DB with URI `mode=ro` so any write raises at
+        the SQLite layer. Read-write connections assert `journal_mode=WAL` (better
+        concurrent-reader behavior; persists at the DB-file level) on each open.
+        Foreign keys are enabled on every connection.
+        """
+        if self.config and self.config.readonly:
+            con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        else:
+            con = sqlite3.connect(self._db_path)
+            con.execute("PRAGMA journal_mode=WAL;")
+        con.execute("PRAGMA foreign_keys = ON;")
+        return con
 
     # -------------------------------------------------------------------------
     # Helpers
@@ -196,7 +216,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         )
 
     # -------------------------------------------------------------------------
-    # EXECUTE - Main dispatcher for RemotePluginProxy
+    # EXECUTE - @plugin_action dispatcher (SG-44)
     # -------------------------------------------------------------------------
 
     def execute(
@@ -204,109 +224,116 @@ class SQLiteGraphPlugin(GraphPlugin):
         action: str = "get_schema",  # Action to perform
         **kwargs
     ) -> Dict[str, Any]:  # JSON-serializable result
-        """Dispatch to appropriate method based on action."""
+        """Dispatch to the `@plugin_action`-tagged handler for `action` (SG-44).
 
-        if action == "get_schema":
-            return self.get_schema()
+        Handlers are discovered by walking the class MRO for methods carrying a
+        `_plugin_action` tag (the same source `supported_actions` is built from
+        via `collect_plugin_actions`). Replaces the prior hand-maintained
+        if/elif chain.
+        """
+        for klass in type(self).__mro__:
+            for attr in vars(klass).values():
+                if getattr(attr, "_plugin_action", None) == action:
+                    return attr(self, **kwargs)
+        raise PluginInputError(  # SG-47: typed input-validation
+            f"Unknown action: {action}", fields_invalid=["action"],
+        )
 
-        elif action == "add_nodes":
-            # Convert dicts to GraphNode objects
-            nodes_data = kwargs.get("nodes", [])
-            nodes = []
-            for n in nodes_data:
-                if isinstance(n, dict):
-                    nodes.append(self._dict_to_node(n))
-                else:
-                    nodes.append(n)
-            ids = self.add_nodes(nodes)
-            return {"created_ids": ids, "count": len(ids)}
+    @plugin_action("get_schema")
+    def _action_get_schema(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> get_schema()."""
+        return self.get_schema()
 
-        elif action == "add_edges":
-            edges_data = kwargs.get("edges", [])
-            edges = []
-            for e in edges_data:
-                if isinstance(e, dict):
-                    edges.append(self._dict_to_edge(e))
-                else:
-                    edges.append(e)
-            ids = self.add_edges(edges)
-            return {"created_ids": ids, "count": len(ids)}
+    @plugin_action("add_nodes")
+    def _action_add_nodes(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> add_nodes() (accepts dicts or GraphNode)."""
+        nodes_data = kwargs.get("nodes", [])
+        nodes = [self._dict_to_node(n) if isinstance(n, dict) else n for n in nodes_data]
+        ids = self.add_nodes(nodes)
+        return {"created_ids": ids, "count": len(ids)}
 
-        elif action == "get_node":
-            node = self.get_node(kwargs["node_id"])
-            return {"node": node.to_dict() if node else None}
+    @plugin_action("add_edges")
+    def _action_add_edges(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> add_edges() (accepts dicts or GraphEdge)."""
+        edges_data = kwargs.get("edges", [])
+        edges = [self._dict_to_edge(e) if isinstance(e, dict) else e for e in edges_data]
+        ids = self.add_edges(edges)
+        return {"created_ids": ids, "count": len(ids)}
 
-        elif action == "get_edge":
-            edge = self.get_edge(kwargs["edge_id"])
-            return {"edge": edge.to_dict() if edge else None}
+    @plugin_action("get_node")
+    def _action_get_node(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> get_node()."""
+        node = self.get_node(kwargs["node_id"])
+        return {"node": node.to_dict() if node else None}
 
-        elif action == "get_context":
-            ctx = self.get_context(
-                kwargs["node_id"],
-                depth=kwargs.get("depth", 1),
-                filter_labels=kwargs.get("filter_labels")
-            )
-            return ctx.to_dict()
+    @plugin_action("get_edge")
+    def _action_get_edge(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> get_edge()."""
+        edge = self.get_edge(kwargs["edge_id"])
+        return {"edge": edge.to_dict() if edge else None}
 
-        elif action == "find_nodes_by_source":
-            ref_data = kwargs["source_ref"]
-            if isinstance(ref_data, dict):
-                ref = SourceRef(**ref_data)
-            else:
-                ref = ref_data
-            nodes = self.find_nodes_by_source(ref)
-            return {"nodes": [n.to_dict() for n in nodes], "count": len(nodes)}
+    @plugin_action("get_context")
+    def _action_get_context(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> get_context()."""
+        ctx = self.get_context(
+            kwargs["node_id"],
+            depth=kwargs.get("depth", 1),
+            filter_labels=kwargs.get("filter_labels"),
+        )
+        return ctx.to_dict()
 
-        elif action == "find_nodes_by_label":
-            nodes = self.find_nodes_by_label(
-                kwargs["label"],
-                limit=kwargs.get("limit", 100)
-            )
-            return {"nodes": [n.to_dict() for n in nodes], "count": len(nodes)}
+    @plugin_action("find_nodes_by_source")
+    def _action_find_nodes_by_source(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> find_nodes_by_source()."""
+        ref_data = kwargs["source_ref"]
+        ref = SourceRef(**ref_data) if isinstance(ref_data, dict) else ref_data
+        nodes = self.find_nodes_by_source(ref)
+        return {"nodes": [n.to_dict() for n in nodes], "count": len(nodes)}
 
-        elif action == "update_node":
-            success = self.update_node(kwargs["node_id"], kwargs["properties"])
-            return {"success": success}
+    @plugin_action("find_nodes_by_label")
+    def _action_find_nodes_by_label(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> find_nodes_by_label()."""
+        nodes = self.find_nodes_by_label(kwargs["label"], limit=kwargs.get("limit", 100))
+        return {"nodes": [n.to_dict() for n in nodes], "count": len(nodes)}
 
-        elif action == "update_edge":
-            success = self.update_edge(kwargs["edge_id"], kwargs["properties"])
-            return {"success": success}
+    @plugin_action("update_node")
+    def _action_update_node(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> update_node()."""
+        return {"success": self.update_node(kwargs["node_id"], kwargs["properties"])}
 
-        elif action == "delete_nodes":
-            count = self.delete_nodes(
-                kwargs["node_ids"],
-                cascade=kwargs.get("cascade", True)
-            )
-            return {"deleted_count": count}
+    @plugin_action("update_edge")
+    def _action_update_edge(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> update_edge()."""
+        return {"success": self.update_edge(kwargs["edge_id"], kwargs["properties"])}
 
-        elif action == "delete_edges":
-            count = self.delete_edges(kwargs["edge_ids"])
-            return {"deleted_count": count}
+    @plugin_action("delete_nodes")
+    def _action_delete_nodes(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> delete_nodes()."""
+        count = self.delete_nodes(kwargs["node_ids"], cascade=kwargs.get("cascade", True))
+        return {"deleted_count": count}
 
-        elif action == "import_graph":
-            graph_data = kwargs["graph_data"]
-            if isinstance(graph_data, dict):
-                graph_data = GraphContext.from_dict(graph_data)
-            stats = self.import_graph(
-                graph_data,
-                merge_strategy=kwargs.get("merge_strategy", "overwrite")
-            )
-            return stats
+    @plugin_action("delete_edges")
+    def _action_delete_edges(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> delete_edges()."""
+        return {"deleted_count": self.delete_edges(kwargs["edge_ids"])}
 
-        elif action == "export_graph":
-            ctx = self.export_graph(filter_query=kwargs.get("filter_query"))
-            return ctx.to_dict()
+    @plugin_action("import_graph")
+    def _action_import_graph(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> import_graph() (dict or GraphContext)."""
+        graph_data = kwargs["graph_data"]
+        if isinstance(graph_data, dict):
+            graph_data = GraphContext.from_dict(graph_data)
+        return self.import_graph(graph_data, merge_strategy=kwargs.get("merge_strategy", "overwrite"))
 
-        elif action == "query":
-            # Raw query execution (future enhancement)
-            query = kwargs.get("query", "")
-            self.logger.warning(f"Raw query action not fully implemented: {query}")
-            return {"status": "not_implemented", "query": str(query)}
+    @plugin_action("export_graph")
+    def _action_export_graph(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> export_graph()."""
+        return self.export_graph(filter_query=kwargs.get("filter_query")).to_dict()
 
-        else:
-            raise PluginInputError(  # SG-47: typed input-validation
-                f"Unknown action: {action}", fields_invalid=["action"],
-            )
+    @plugin_action("query")
+    def _action_query(self, **kwargs) -> Dict[str, Any]:
+        """Action wrapper -> query() (read-only SELECT)."""
+        return self.query(kwargs.get("sql", kwargs.get("query", "")), params=kwargs.get("params"))
 
     # -------------------------------------------------------------------------
     # CREATE
@@ -319,7 +346,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         """Bulk create nodes."""
         ids = []
         now = time.time()
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             for n in nodes:
                 sources_json = json.dumps([s.to_dict() for s in n.sources])
                 props_json = json.dumps(n.properties)
@@ -340,7 +367,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         """Bulk create edges."""
         ids = []
         now = time.time()
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             con.execute("PRAGMA foreign_keys = ON;")
             for e in edges:
                 props_json = json.dumps(e.properties)
@@ -363,7 +390,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         node_id: str  # UUID of node to retrieve
     ) -> Optional[GraphNode]:  # Node or None if not found
         """Get a single node by ID."""
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             cur = con.execute(
                 "SELECT id, label, properties, sources, created_at, updated_at FROM nodes WHERE id = ?",
                 (node_id,)
@@ -376,7 +403,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         edge_id: str  # UUID of edge to retrieve
     ) -> Optional[GraphEdge]:  # Edge or None if not found
         """Get a single edge by ID."""
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             cur = con.execute(
                 "SELECT id, source_id, target_id, relation_type, properties, created_at, updated_at FROM edges WHERE id = ?",
                 (edge_id,)
@@ -404,7 +431,7 @@ class SQLiteGraphPlugin(GraphPlugin):
             params.append(source_ref.segment_slice)
 
         results = []
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             cur = con.execute(query, tuple(params))
             for row in cur:
                 results.append(self._row_to_node(row))
@@ -417,7 +444,7 @@ class SQLiteGraphPlugin(GraphPlugin):
     ) -> List[GraphNode]:  # Matching nodes
         """Find nodes by label."""
         results = []
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             cur = con.execute(
                 "SELECT id, label, properties, sources, created_at, updated_at FROM nodes WHERE label = ? LIMIT ?",
                 (label, limit)
@@ -435,7 +462,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         """Get the neighborhood of a specific node."""
         # For depth=1, use simple query; for deeper, use recursive CTE
         edge_ids = []
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             if depth == 1:
                 cur = con.execute(
                     "SELECT id FROM edges WHERE source_id = ? OR target_id = ?",
@@ -474,7 +501,7 @@ class SQLiteGraphPlugin(GraphPlugin):
 
         if edge_ids:
             placeholders = ','.join('?' for _ in edge_ids)
-            with sqlite3.connect(self._db_path) as con:
+            with self._connect() as con:
                 cur = con.execute(
                     f"SELECT id, source_id, target_id, relation_type, properties, created_at, updated_at FROM edges WHERE id IN ({placeholders})",
                     tuple(edge_ids)
@@ -489,7 +516,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         nodes = []
         if node_ids_in_context:
             placeholders = ','.join('?' for _ in node_ids_in_context)
-            with sqlite3.connect(self._db_path) as con:
+            with self._connect() as con:
                 sql = f"SELECT id, label, properties, sources, created_at, updated_at FROM nodes WHERE id IN ({placeholders})"
 
                 # Apply optional label filtering
@@ -518,7 +545,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         properties: Dict[str, Any]  # Properties to merge/update
     ) -> bool:  # True if successful
         """Partial update of node properties."""
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             # Fetch existing to merge
             cur = con.execute("SELECT properties FROM nodes WHERE id = ?", (node_id,))
             row = cur.fetchone()
@@ -540,7 +567,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         properties: Dict[str, Any]  # Properties to merge/update
     ) -> bool:  # True if successful
         """Partial update of edge properties."""
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             cur = con.execute("SELECT properties FROM edges WHERE id = ?", (edge_id,))
             row = cur.fetchone()
             if not row:
@@ -565,7 +592,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         cascade: bool = True  # Also delete connected edges
     ) -> int:  # Number of nodes deleted
         """Delete nodes (and optionally connected edges)."""
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             if cascade:
                 con.execute("PRAGMA foreign_keys = ON;")  # Ensures cascade works
             else:
@@ -583,7 +610,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         edge_ids: List[str]  # UUIDs of edges to delete
     ) -> int:  # Number of edges deleted
         """Delete edges."""
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             placeholders = ','.join('?' for _ in edge_ids)
             cur = con.execute(
                 f"DELETE FROM edges WHERE id IN ({placeholders})",
@@ -598,7 +625,7 @@ class SQLiteGraphPlugin(GraphPlugin):
     def get_schema(self) -> Dict[str, Any]:  # Graph schema/ontology
         """Return the current ontology/schema of the graph."""
         schema = {"node_labels": [], "edge_types": [], "counts": {}}
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             # Labels
             cur = con.execute("SELECT DISTINCT label FROM nodes")
             schema["node_labels"] = [r[0] for r in cur.fetchall()]
@@ -618,12 +645,106 @@ class SQLiteGraphPlugin(GraphPlugin):
         self,
         graph_data: GraphContext,  # Data to import
         merge_strategy: str = "overwrite"  # "overwrite", "skip", or "merge"
-    ) -> Dict[str, int]:  # Import statistics {nodes_created, edges_created, ...}
-        """Bulk import a GraphContext (e.g., from backup or another plugin)."""
-        # Reuse bulk add methods (currently uses overwrite via INSERT)
-        n = self.add_nodes(graph_data.nodes)
-        e = self.add_edges(graph_data.edges)
-        return {"nodes_created": len(n), "edges_created": len(e)}
+    ) -> Dict[str, int]:  # Import statistics {nodes_created, edges_created, merge_strategy}
+        """Bulk import a GraphContext honoring merge_strategy (SG-41).
+
+        On id-conflict: "skip" keeps the existing row untouched; "overwrite"
+        replaces its mutable fields with the incoming values; "merge" unions
+        properties (incoming wins per key) and unions node sources by identity.
+        Brand-new ids are always inserted. The `nodes_created`/`edges_created`
+        counts report rows written (inserted or updated).
+        """
+        if merge_strategy not in ("overwrite", "skip", "merge"):
+            raise PluginInputError(  # SG-47: typed input-validation
+                f"Unknown merge_strategy: {merge_strategy}", fields_invalid=["merge_strategy"],
+            )
+        n = self._import_nodes(graph_data.nodes, merge_strategy)
+        e = self._import_edges(graph_data.edges, merge_strategy)
+        return {"nodes_created": n, "edges_created": e, "merge_strategy": merge_strategy}
+
+    def _import_nodes(
+        self,
+        nodes: List[GraphNode],  # Nodes to import
+        merge_strategy: str  # "overwrite" | "skip" | "merge"
+    ) -> int:  # Count of rows written (inserted or updated)
+        """Import nodes honoring merge_strategy (see import_graph)."""
+        now = time.time()
+        written = 0
+        with self._connect() as con:
+            for node in nodes:
+                props_json = json.dumps(node.properties)
+                sources_json = json.dumps([s.to_dict() for s in node.sources])
+                row = con.execute("SELECT properties, sources FROM nodes WHERE id = ?", (node.id,)).fetchone()
+                if row is None:
+                    con.execute(
+                        "INSERT INTO nodes (id, label, properties, sources, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (node.id, node.label, props_json, sources_json, now, now),
+                    )
+                    written += 1
+                elif merge_strategy == "skip":
+                    continue
+                elif merge_strategy == "overwrite":
+                    con.execute(
+                        "UPDATE nodes SET label = ?, properties = ?, sources = ?, updated_at = ? WHERE id = ?",
+                        (node.label, props_json, sources_json, now, node.id),
+                    )
+                    written += 1
+                else:  # merge
+                    merged_props = json.loads(row[0]) if row[0] else {}
+                    merged_props.update(node.properties)
+                    existing_sources = json.loads(row[1]) if row[1] else []
+                    seen = {(s.get("plugin_name"), s.get("row_id"), s.get("segment_slice")) for s in existing_sources}
+                    for s in node.sources:
+                        sd = s.to_dict()
+                        key = (sd.get("plugin_name"), sd.get("row_id"), sd.get("segment_slice"))
+                        if key not in seen:
+                            existing_sources.append(sd)
+                            seen.add(key)
+                    con.execute(
+                        "UPDATE nodes SET label = ?, properties = ?, sources = ?, updated_at = ? WHERE id = ?",
+                        (node.label, json.dumps(merged_props), json.dumps(existing_sources), now, node.id),
+                    )
+                    written += 1
+        return written
+
+    def _import_edges(
+        self,
+        edges: List[GraphEdge],  # Edges to import
+        merge_strategy: str  # "overwrite" | "skip" | "merge"
+    ) -> int:  # Count of rows written (inserted or updated)
+        """Import edges honoring merge_strategy (see import_graph)."""
+        now = time.time()
+        written = 0
+        with self._connect() as con:
+            for edge in edges:
+                props_json = json.dumps(edge.properties)
+                row = con.execute("SELECT properties FROM edges WHERE id = ?", (edge.id,)).fetchone()
+                if row is None:
+                    try:
+                        con.execute(
+                            "INSERT INTO edges (id, source_id, target_id, relation_type, properties, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (edge.id, edge.source_id, edge.target_id, edge.relation_type, props_json, now, now),
+                        )
+                        written += 1
+                    except sqlite3.IntegrityError as err:
+                        self.logger.warning(f"Edge import error (likely missing node): {err}")
+                elif merge_strategy == "skip":
+                    continue
+                elif merge_strategy == "overwrite":
+                    con.execute(
+                        "UPDATE edges SET source_id = ?, target_id = ?, relation_type = ?, properties = ?, updated_at = ? WHERE id = ?",
+                        (edge.source_id, edge.target_id, edge.relation_type, props_json, now, edge.id),
+                    )
+                    written += 1
+                else:  # merge
+                    merged = json.loads(row[0]) if row[0] else {}
+                    merged.update(edge.properties)
+                    con.execute(
+                        "UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?",
+                        (json.dumps(merged), now, edge.id),
+                    )
+                    written += 1
+        return written
 
     def export_graph(
         self,
@@ -634,7 +755,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         all_nodes = []
         all_edges = []
 
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect() as con:
             cur = con.execute("SELECT id, label, properties, sources, created_at, updated_at FROM nodes")
             for row in cur:
                 all_nodes.append(self._row_to_node(row))
@@ -645,7 +766,44 @@ class SQLiteGraphPlugin(GraphPlugin):
 
         return GraphContext(nodes=all_nodes, edges=all_edges)
 
+    def query(
+        self,
+        sql: str,  # A single read-only SELECT (or WITH ... SELECT) statement
+        params: Optional[List[Any]] = None  # Bound parameters for the statement
+    ) -> Dict[str, Any]:  # {"columns": [...], "rows": [[...]], "row_count": int}
+        """Execute a single read-only SELECT and return its rows (SG-41).
+
+        Guards reject empty input, multiple statements, and anything not starting
+        with SELECT/WITH. The statement runs on a fresh read-only connection
+        (URI `mode=ro`), so even a query that slips past the prefix guard cannot
+        mutate the database. Bound `params` use SQLite's qmark placeholders.
+        """
+        text = (sql or "").strip()
+        while text.endswith(";"):
+            text = text[:-1].strip()
+        if not text:
+            raise PluginInputError("query requires a non-empty SQL string", fields_invalid=["sql"])
+        if ";" in text:
+            raise PluginInputError("query accepts a single statement only", fields_invalid=["sql"])
+        head = text.lstrip("(").split(None, 1)[0].lower()
+        if head not in ("select", "with"):
+            raise PluginInputError(
+                "query allows read-only SELECT statements only", fields_invalid=["sql"],
+            )
+        con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        try:
+            cur = con.execute(text, tuple(params) if params else ())
+            columns = [d[0] for d in cur.description] if cur.description else []
+            rows = [list(r) for r in cur.fetchall()]
+        finally:
+            con.close()
+        return {"columns": columns, "rows": rows, "row_count": len(rows)}
+
     def cleanup(self) -> None:
         """Clean up resources."""
         # SQLite connections are managed via context managers, nothing to do here
         pass
+
+
+SQLiteGraphPlugin.supported_actions = collect_plugin_actions(SQLiteGraphPlugin)
+
