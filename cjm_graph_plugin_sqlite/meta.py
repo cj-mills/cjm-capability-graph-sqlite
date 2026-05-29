@@ -40,7 +40,14 @@ def get_plugin_metadata() -> Dict[str, Any]:  # Plugin metadata for manifest gen
         "version": __version__,
         "type": "graph",
         "category": "knowledge-management",
-        "interface": f"{package_name}.plugin_interface.GraphPlugin",
+        # T30 / SG-7 fix: the interface lives in cjm-graph-plugin-system (the
+        # interface library), NOT in this plugin's own package. Pre-fix the
+        # f"{package_name}.plugin_interface.GraphPlugin" expression produced
+        # the wrong FQN ("cjm_graph_plugin_sqlite.plugin_interface.GraphPlugin")
+        # because package_name is derived from plugin_name. Substrate's runtime
+        # fallback masked this; cjm-ctl validate per the audit's SG-7 design
+        # catches it at install/release.
+        "interface": "cjm_graph_plugin_system.plugin_interface.GraphPlugin",
 
         "module": f"{package_name}.plugin",
         "class": "SQLiteGraphPlugin",
