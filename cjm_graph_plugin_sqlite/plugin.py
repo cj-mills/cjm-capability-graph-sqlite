@@ -62,12 +62,12 @@ class SQLiteGraphPlugin(GraphPlugin):
     @property
     def name(self) -> str:  # Plugin name identifier
         """Get the plugin name identifier."""
-        return "sqlite_graph"
+        return get_plugin_metadata()["name"]
 
     @property
     def version(self) -> str:  # Plugin version string
         """Get the plugin version string."""
-        return "0.1.0"
+        return get_plugin_metadata()["version"]
 
     def get_current_config(self) -> Dict[str, Any]:  # Current configuration as dictionary
         """Return current configuration state."""
@@ -231,13 +231,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         via `collect_plugin_actions`). Replaces the prior hand-maintained
         if/elif chain.
         """
-        for klass in type(self).__mro__:
-            for attr in vars(klass).values():
-                if getattr(attr, "_plugin_action", None) == action:
-                    return attr(self, **kwargs)
-        raise PluginInputError(  # SG-47: typed input-validation
-            f"Unknown action: {action}", fields_invalid=["action"],
-        )
+        return self.dispatch_to_action(action, **kwargs)
 
     @plugin_action("get_schema")
     def _action_get_schema(self, **kwargs) -> Dict[str, Any]:
@@ -799,10 +793,7 @@ class SQLiteGraphPlugin(GraphPlugin):
             con.close()
         return {"columns": columns, "rows": rows, "row_count": len(rows)}
 
-    def cleanup(self) -> None:
-        """Clean up resources."""
-        # SQLite connections are managed via context managers, nothing to do here
-        pass
+
 
 
 SQLiteGraphPlugin.supported_actions = collect_plugin_actions(SQLiteGraphPlugin)
