@@ -160,7 +160,7 @@ class SQLiteGraphPlugin(GraphPlugin):
         """Convert DB row to GraphNode DTO."""
         props = json.loads(row[2]) if row[2] else {}
         sources_raw = json.loads(row[3]) if row[3] else []
-        sources = [SourceRef(**s) for s in sources_raw]
+        sources = [SourceRef.from_dict(s) for s in sources_raw]
         return GraphNode(
             id=row[0], label=row[1], properties=props, sources=sources,
             created_at=row[4] if len(row) > 4 else None,
@@ -184,21 +184,8 @@ class SQLiteGraphPlugin(GraphPlugin):
         self,
         data: Dict[str, Any]  # Node data as dictionary
     ) -> GraphNode:  # Reconstructed GraphNode
-        """Convert dictionary to GraphNode, handling nested sources."""
-        sources = []
-        for s in data.get("sources", []):
-            if isinstance(s, dict):
-                sources.append(SourceRef(**s))
-            else:
-                sources.append(s)
-        return GraphNode(
-            id=data["id"],
-            label=data["label"],
-            properties=data.get("properties", {}),
-            sources=sources,
-            created_at=data.get("created_at"),
-            updated_at=data.get("updated_at"),
-        )
+        """Convert dictionary to GraphNode (nested sources via GraphNode.from_dict)."""
+        return GraphNode.from_dict(data)
 
     def _dict_to_edge(
         self,
@@ -280,7 +267,7 @@ class SQLiteGraphPlugin(GraphPlugin):
     def _action_find_nodes_by_source(self, **kwargs) -> Dict[str, Any]:
         """Action wrapper -> find_nodes_by_source()."""
         ref_data = kwargs["source_ref"]
-        ref = SourceRef(**ref_data) if isinstance(ref_data, dict) else ref_data
+        ref = SourceRef.from_dict(ref_data) if isinstance(ref_data, dict) else ref_data
         nodes = self.find_nodes_by_source(ref)
         return {"nodes": [n.to_dict() for n in nodes], "count": len(nodes)}
 
@@ -410,25 +397,23 @@ class SQLiteGraphPlugin(GraphPlugin):
         source_ref: SourceRef  # External resource reference
     ) -> List[GraphNode]:  # Nodes attached to this source
         """Find all nodes linked to a specific external resource."""
-        # Use SQLite's json_each() to search within the sources JSON array
+        # Content-hash-primary reverse index (CR-19): identity = content_hash
+        # (SQL match); the locator is verified Python-side, which keeps the SQL
+        # free of per-locator-kind coupling. Slice is NOT compared: the hash is
+        # over the consumed (sliced) content, so hash equality already pins it.
         query = """
             SELECT DISTINCT n.id, n.label, n.properties, n.sources, n.created_at, n.updated_at
             FROM nodes n, json_each(n.sources) as src
-            WHERE json_extract(src.value, '$.plugin_name') = ?
-              AND json_extract(src.value, '$.row_id') = ?
+            WHERE json_extract(src.value, '$.content_hash') = ?
         """
-        params = [source_ref.plugin_name, source_ref.row_id]
-
-        # If segment slice is specified, add it to query
-        if source_ref.segment_slice:
-            query += " AND json_extract(src.value, '$.segment_slice') = ?"
-            params.append(source_ref.segment_slice)
-
         results = []
         with self._connect() as con:
-            cur = con.execute(query, tuple(params))
+            cur = con.execute(query, (source_ref.content_hash,))
             for row in cur:
-                results.append(self._row_to_node(row))
+                node = self._row_to_node(row)
+                if any(r.content_hash == source_ref.content_hash
+                       and r.locator == source_ref.locator for r in node.sources):
+                    results.append(node)
         return results
 
     def find_nodes_by_label(
@@ -687,10 +672,10 @@ class SQLiteGraphPlugin(GraphPlugin):
                     merged_props = json.loads(row[0]) if row[0] else {}
                     merged_props.update(node.properties)
                     existing_sources = json.loads(row[1]) if row[1] else []
-                    seen = {(s.get("plugin_name"), s.get("row_id"), s.get("segment_slice")) for s in existing_sources}
+                    seen = {json.dumps(s, sort_keys=True) for s in existing_sources}
                     for s in node.sources:
                         sd = s.to_dict()
-                        key = (sd.get("plugin_name"), sd.get("row_id"), sd.get("segment_slice"))
+                        key = json.dumps(sd, sort_keys=True)
                         if key not in seen:
                             existing_sources.append(sd)
                             seen.add(key)
