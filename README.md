@@ -12,10 +12,11 @@ pip install cjm_graph_plugin_sqlite
 ## Project Structure
 
     nbs/
-    ├── meta.ipynb   # Metadata introspection for the SQLite Graph plugin used by cjm-ctl to generate the registration manifest.
-    └── plugin.ipynb # Plugin implementation for Context Graph using SQLite
+    ├── meta.ipynb              # Metadata introspection for the SQLite Graph plugin used by cjm-ctl to generate the registration manifest.
+    ├── plugin.ipynb            # Plugin implementation for Context Graph using SQLite
+    └── query_translation.ipynb # The per-backend translation of the typed query expressions (pass-2 Thread 5; stage 4): `NodeQuery`/`EdgeQuery` → parameterized SQLite SQL over the `nodes`/`edges` schema. THIS module is what makes the typed surface portable — the expression is domain- and backend-neutral; every backend tool owns a translation like this one (the ratified stage-4 split: backend owns translation; the adapter stays generic). Pure functions, unit-tested against an in-memory DB with the production schema — no plugin runtime needed.
 
-Total: 2 notebooks
+Total: 3 notebooks
 
 ## Module Dependencies
 
@@ -23,11 +24,13 @@ Total: 2 notebooks
 graph LR
     meta["meta<br/>Metadata"]
     plugin["plugin<br/>SQLite Graph Plugin"]
+    query_translation["query_translation<br/>query_translation"]
 
+    plugin --> query_translation
     plugin --> meta
 ```
 
-*1 cross-module dependencies detected*
+*2 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -59,12 +62,12 @@ def get_plugin_metadata() -> Dict[str, Any]:  # Plugin metadata for manifest gen
     base_path = os.path.dirname(os.path.dirname(sys.executable))
     
     # Use CJM config if available, else fallback to env-relative paths
-    cjm_data_dir = os.environ.get("CJM_DATA_DIR")
+    cjm_plugin_data_dir = os.environ.get("CJM_PLUGIN_DATA_DIR")
     
     # Plugin data directory
     plugin_name = "cjm-graph-plugin-sqlite"
     package_name = plugin_name.replace("-", "_")
-    if cjm_data_dir
+    if cjm_plugin_data_dir
     "Return metadata required to register this plugin with the PluginManager."
 ```
 
@@ -77,8 +80,59 @@ def get_plugin_metadata() -> Dict[str, Any]:  # Plugin metadata for manifest gen
 ``` python
 from cjm_graph_plugin_sqlite.plugin import (
     SQLiteGraphPluginConfig,
-    SQLiteGraphPlugin
+    SQLiteGraphPlugin,
+    query_nodes,
+    query_edges,
+    raw_query,
+    integrity_check
 )
+```
+
+#### Functions
+
+``` python
+def query_nodes(
+    self,
+    query: NodeQuery,  # Typed node query (the portable, scale-shaped surface)
+) -> NodeQueryResult:  # Typed result (nodes / rows / count per query mode)
+    """
+    Execute a typed node query (stage 4) — translated to parameterized SQL
+    by `query_translation`, run on a fresh read-only connection (SG-41).
+    """
+```
+
+``` python
+def query_edges(
+    self,
+    query: EdgeQuery,  # Typed edge query
+) -> EdgeQueryResult:  # Typed result (edges / rows / count per query mode)
+    "Execute a typed edge query (stage 4) — same contract as `query_nodes`."
+```
+
+``` python
+def raw_query(
+    self,
+    query: RawQuery,  # The marked, backend-coupled raw escape (backend REQUIRED)
+) -> RawQueryResult:  # Tabular backend-shaped result
+    """
+    Execute the raw escape — refuses backend mismatches (non-portable by
+    construction); the read-only single-statement guards are `query`'s (SG-41).
+    Recurring raw patterns are promotion candidates into the typed surface.
+    """
+```
+
+``` python
+def integrity_check(self) -> Dict[str, Any]:  # {"ok": bool, "errors": [...], "backend": "sqlite"}
+    """Backend self-check (stage 4; the G3 corruption find institutionalized):
+    `PRAGMA quick_check` on a fresh read-only connection so loop-backs and
+    stress tests assert storage health cheaply and corruption FAILS LOUDLY."""
+    con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+    try
+    """
+    Backend self-check (stage 4; the G3 corruption find institutionalized):
+    `PRAGMA quick_check` on a fresh read-only connection so loop-backs and
+    stress tests assert storage health cheaply and corruption FAILS LOUDLY.
+    """
 ```
 
 #### Classes
@@ -105,7 +159,7 @@ class SQLiteGraphPlugin:
     
     def name(self) -> str:  # Plugin name identifier
             """Get the plugin name identifier."""
-            return "sqlite_graph"
+            return get_plugin_metadata()["name"]
     
         @property
         def version(self) -> str:  # Plugin version string
@@ -113,7 +167,7 @@ class SQLiteGraphPlugin:
     
     def version(self) -> str:  # Plugin version string
             """Get the plugin version string."""
-            return "0.1.0"
+            return get_plugin_metadata()["version"]
     
         def get_current_config(self) -> Dict[str, Any]:  # Current configuration as dictionary
         "Get the plugin version string."
@@ -243,14 +297,15 @@ counts report rows written (inserted or updated)."
     
     def export_graph(
             self,
-            filter_query: Optional[GraphQuery] = None  # Optional filter
+            filter_query: Optional[NodeQuery] = None  # Typed node filter; None = whole graph (stage 4; GraphQuery dissolved)
         ) -> GraphContext:  # Exported subgraph or full graph
-        "Export the entire graph or a filtered subset."
+        "Export the whole graph, or the subgraph selected by a typed node
+query (matching nodes + the edges among them)."
     
     def query(
             self,
             sql: str,  # A single read-only SELECT (or WITH ... SELECT) statement
-            params: Optional[List[Any]] = None  # Bound parameters for the statement
+            params: Optional[Union[List[Any], Dict[str, Any]]] = None  # Bound parameters (positional list or named dict)
         ) -> Dict[str, Any]:  # {"columns": [...], "rows": [[...]], "row_count": int}
         "Execute a single read-only SELECT and return its rows (SG-41).
 
@@ -258,7 +313,125 @@ Guards reject empty input, multiple statements, and anything not starting
 with SELECT/WITH. The statement runs on a fresh read-only connection
 (URI `mode=ro`), so even a query that slips past the prefix guard cannot
 mutate the database. Bound `params` use SQLite's qmark placeholders."
+```
+
+### query_translation (`query_translation.ipynb`)
+
+> The per-backend translation of the typed query expressions (pass-2
+> Thread 5; stage 4): `NodeQuery`/`EdgeQuery` → parameterized SQLite SQL
+> over the `nodes`/`edges` schema. THIS module is what makes the typed
+> surface portable — the expression is domain- and backend-neutral;
+> every backend tool owns a translation like this one (the ratified
+> stage-4 split: backend owns translation; the adapter stays generic).
+> Pure functions, unit-tested against an in-memory DB with the
+> production schema — no plugin runtime needed.
+
+#### Import
+
+``` python
+from cjm_graph_plugin_sqlite.query_translation import (
+    NODE_FULL_COLUMNS,
+    EDGE_FULL_COLUMNS,
+    translate_node_query,
+    translate_edge_query
+)
+```
+
+#### Functions
+
+``` python
+def _json_path(
+    prop: str,  # Property name or dotted path (e.g. "payload.document_id")
+) -> str:  # SQL string literal for json_extract's path argument
+    "Validate a dotted property path and render the JSON-path literal."
+```
+
+``` python
+def _escape_like(
+    value: str,  # Raw substring the caller wants matched literally
+) -> str:  # Value with LIKE wildcards escaped (ESCAPE '\\')
+    "Escape `%` / `_` / `\` so `contains` matches literally, never as wildcards."
+```
+
+``` python
+def _predicate_sql(
+    pred: PropertyPredicate,  # One typed property predicate
+    props_col: str,  # SQL expression for the properties JSON column (e.g. "n.properties")
+) -> Tuple[str, List[Any]]:  # (SQL fragment, bound params)
+    "Compile one property predicate to a parameterized SQL fragment."
+```
+
+``` python
+def _source_match_sql(
+    sp: SourcePredicate,  # Provenance match (content-hash-primary per CR-19)
+    sources_expr: str,  # SQL expression for the sources JSON column (e.g. "n.sources")
+) -> Tuple[str, List[Any]]:  # (EXISTS fragment, bound params)
+    """
+    Compile a source predicate to an EXISTS over the sources array.
     
-    def cleanup(self) -> None
-        "Clean up resources."
+    Content-hash-primary (identity field = the stable query surface, C19).
+    A locator constraint RAISES — unsupported in the typed translation
+    (use `find_nodes_by_source` for locator equality; recurring need here
+    is the promotion evidence the raw-escape posture wants recorded).
+    """
+```
+
+``` python
+def _relation_exists_sql(
+    rel: RelationPredicate,  # One-hop relation constraint (+ far-end constraints)
+    node_expr: str,  # SQL expression for the candidate node id (e.g. "n.id", "e.source_id")
+) -> Tuple[str, List[Any]]:  # (EXISTS fragment, bound params)
+    """
+    Compile a relation predicate to a correlated EXISTS (no row multiplication).
+    
+    Far-end constraints (stage-4 promotions): `node_id` / `node_ids` pin the
+    far node; `node_source` nests a provenance EXISTS on the far node.
+    Subquery scoping keeps the fixed aliases (r / fn / src) collision-free.
+    """
+```
+
+``` python
+def _order_limit_sql(
+    query,  # NodeQuery or EdgeQuery (order_by / limit / offset fields)
+    props_col: str,  # Properties column expression for ORDER BY paths
+    params: List[Any],  # Bound-params list (appended in place)
+) -> str:  # ORDER BY / LIMIT / OFFSET tail
+    "Compile the shared ordering + paging tail."
+```
+
+``` python
+def translate_node_query(
+    q: NodeQuery,  # Typed node query
+) -> Tuple[str, List[Any], str, Optional[List[str]]]:  # (sql, params, mode, row keys)
+    """
+    Translate a `NodeQuery` to parameterized SQLite SQL.
+    
+    mode: "count" | "rows" | "full" (count > project > full, mirroring the
+    result DTO's exactly-one-populated contract). For "rows", the returned
+    keys list zips against each cursor row ("id" always first; "label"
+    projects structurally; "sources" projects as the raw JSON column for the
+    caller to parse).
+    """
+```
+
+``` python
+def translate_edge_query(
+    q: EdgeQuery,  # Typed edge query
+) -> Tuple[str, List[Any], str, Optional[List[str]]]:  # (sql, params, mode, row keys)
+    """
+    Translate an `EdgeQuery` to parameterized SQLite SQL.
+    
+    Same mode contract as `translate_node_query`. Projected rows always carry
+    `id`/`source_id`/`target_id`; `relation_type` projects structurally.
+    Endpoint constraints (`source_related`/`target_related` — the D13
+    NEXT-chain count) compile to correlated EXISTS on the endpoint node.
+    """
+```
+
+#### Variables
+
+``` python
+_PROP_PATH_RE  # Dotted-path guard (paths are interpolated; values are bound)
+NODE_FULL_COLUMNS = 'n.id, n.label, n.properties, n.sources, n.created_at, n.updated_at'  # Matches _row_to_node order
+EDGE_FULL_COLUMNS = 'e.id, e.source_id, e.target_id, e.relation_type, e.properties, e.created_at, e.updated_at'  # Matches _row_to_edge order
 ```
