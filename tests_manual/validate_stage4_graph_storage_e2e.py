@@ -223,18 +223,26 @@ async def main():
             t_contains = time.monotonic() - t0
             assert res.count and res.count > 0, "P12 contains found nothing"
             print(f"  contains('nanjing') case-insensitive: {res.count} hits in {t_contains:.2f}s")
-            docs = await task_call(queue, GRAPH, "query_nodes",
-                                   query=NodeQuery(label="Document").to_dict())
+            # Stage 5 (Document -> Source): the spine roots at Source; fine
+            # segments hang under AudioSegments, so the D13 aggregate scopes
+            # through the batched far-end constraint over the coarse layer.
+            srcs = await task_call(queue, GRAPH, "query_nodes",
+                                   query=NodeQuery(label="Source").to_dict())
             t0 = time.monotonic()
-            for d in (docs.nodes or []):
-                part_of = RelationPredicate("PART_OF", node_id=d.id)
+            for d in (srcs.nodes or []):
+                asegs = await task_call(queue, GRAPH, "query_nodes", query=NodeQuery(
+                    label="AudioSegment",
+                    related=RelationPredicate("PART_OF", node_id=d.id),
+                    project=["index"]).to_dict())
+                aseg_ids = [r["id"] for r in (asegs.rows or [])]
+                part_of = RelationPredicate("PART_OF", node_ids=aseg_ids)
                 segs = await task_call(queue, GRAPH, "query_nodes", query=NodeQuery(
                     label="Segment", related=part_of, count=True).to_dict())
                 nxt = await task_call(queue, GRAPH, "query_edges", query=EdgeQuery(
                     relation_type="NEXT", source_related=part_of, count=True).to_dict())
                 assert nxt.count == max(0, (segs.count or 0) - 1), (d.id, segs.count, nxt.count)
             t_agg = time.monotonic() - t0
-            print(f"  D13 aggregates over {len(docs.nodes or [])} docs / 13k+ segs: "
+            print(f"  D13 aggregates over {len(srcs.nodes or [])} sources / 6.6k+ segs: "
                   f"{t_agg:.2f}s total (bounded; no neighborhood materialization)")
             assert t_agg < 30, f"aggregates not bounded: {t_agg:.1f}s"
             mgr.unload_plugin(GRAPH)
