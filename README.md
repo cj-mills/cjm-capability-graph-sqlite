@@ -12,25 +12,22 @@ pip install cjm_graph_plugin_sqlite
 ## Project Structure
 
     nbs/
-    ├── meta.ipynb              # Metadata introspection for the SQLite Graph plugin used by cjm-ctl to generate the registration manifest.
     ├── plugin.ipynb            # Plugin implementation for Context Graph using SQLite
     └── query_translation.ipynb # The per-backend translation of the typed query expressions (pass-2 Thread 5; stage 4): `NodeQuery`/`EdgeQuery` → parameterized SQLite SQL over the `nodes`/`edges` schema. THIS module is what makes the typed surface portable — the expression is domain- and backend-neutral; every backend tool owns a translation like this one (the ratified stage-4 split: backend owns translation; the adapter stays generic). Pure functions, unit-tested against an in-memory DB with the production schema — no plugin runtime needed.
 
-Total: 3 notebooks
+Total: 2 notebooks
 
 ## Module Dependencies
 
 ``` mermaid
 graph LR
-    meta["meta<br/>Metadata"]
     plugin["plugin<br/>SQLite Graph Plugin"]
     query_translation["query_translation<br/>query_translation"]
 
     plugin --> query_translation
-    plugin --> meta
 ```
 
-*2 cross-module dependencies detected*
+*1 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -39,37 +36,6 @@ No CLI commands found in this project.
 ## Module Overview
 
 Detailed documentation for each module in the project:
-
-### Metadata (`meta.ipynb`)
-
-> Metadata introspection for the SQLite Graph plugin used by cjm-ctl to
-> generate the registration manifest.
-
-#### Import
-
-``` python
-from cjm_graph_plugin_sqlite.meta import (
-    get_plugin_metadata
-)
-```
-
-#### Functions
-
-``` python
-def get_plugin_metadata() -> Dict[str, Any]:  # Plugin metadata for manifest generation
-    """Return metadata required to register this plugin with the PluginManager."""
-    # Fallback base path (current behavior for backward compatibility)
-    base_path = os.path.dirname(os.path.dirname(sys.executable))
-    
-    # Use CJM config if available, else fallback to env-relative paths
-    cjm_plugin_data_dir = os.environ.get("CJM_PLUGIN_DATA_DIR")
-    
-    # Plugin data directory
-    plugin_name = "cjm-graph-plugin-sqlite"
-    package_name = plugin_name.replace("-", "_")
-    if cjm_plugin_data_dir
-    "Return metadata required to register this plugin with the PluginManager."
-```
 
 ### SQLite Graph Plugin (`plugin.ipynb`)
 
@@ -157,20 +123,26 @@ class SQLiteGraphPlugin:
             self.logger = logging.getLogger(f"{__name__}.{type(self).__name__}")
             self.config: SQLiteGraphPluginConfig = None
     
-    def name(self) -> str:  # Plugin name identifier
-            """Get the plugin name identifier."""
-            return get_plugin_metadata()["name"]
+    def name(self) -> str:  # Tool identity, derived from the installed distribution (PILLAR 1c)
+            """Get the tool name (the installed distribution name)."""
+            from importlib.metadata import metadata, packages_distributions
+            # `__package__` is None in a notebook/__main__ context, so guard the
+            # ffmpeg-template derivation with the known package module name.
+            pkg = __package__ or "cjm_graph_plugin_sqlite"
+            dist = (packages_distributions().get(pkg) or [pkg.replace("_", "-")])[0]
+            return metadata(dist)["Name"]
     
         @property
-        def version(self) -> str:  # Plugin version string
-        "Get the plugin name identifier."
+        def version(self) -> str:  # Tool version
+        "Get the tool name (the installed distribution name)."
     
-    def version(self) -> str:  # Plugin version string
-            """Get the plugin version string."""
-            return get_plugin_metadata()["version"]
+    def version(self) -> str:  # Tool version
+            """Get the tool version string."""
+            from cjm_graph_plugin_sqlite import __version__
+            return __version__
     
         def get_current_config(self) -> Dict[str, Any]:  # Current configuration as dictionary
-        "Get the plugin version string."
+        "Get the tool version string."
     
     def get_current_config(self) -> Dict[str, Any]:  # Current configuration as dictionary
             """Return current configuration state."""
@@ -192,18 +164,6 @@ class SQLiteGraphPlugin:
             config: Optional[Any] = None  # Configuration dataclass, dict, or None
         ) -> None
         "Initialize DB connection and schema."
-    
-    def execute(
-            self,
-            action: str = "get_schema",  # Action to perform
-            **kwargs
-        ) -> Dict[str, Any]:  # JSON-serializable result
-        "Dispatch to the `@plugin_action`-tagged handler for `action` (SG-44).
-
-Handlers are discovered by walking the class MRO for methods carrying a
-`_plugin_action` tag (the same source `supported_actions` is built from
-via `collect_plugin_actions`). Replaces the prior hand-maintained
-if/elif chain."
     
     def add_nodes(
             self,
