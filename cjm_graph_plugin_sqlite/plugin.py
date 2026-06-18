@@ -12,20 +12,28 @@ import json
 import logging
 import os
 import sqlite3
-from cjm_plugin_system.core.errors import PluginInputError
-from cjm_plugin_system.core.interface import plugin_action, collect_plugin_actions
 import time
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+# Stage 8 (Option C / PILLAR 1c): the tool re-bases onto ToolCapability. The
+# graph store IS this tool's persistence, so unlike the compute tools there is
+# no cache bookend to lift out -- GenericGraphStorageAdapter is a pure
+# wire-normalize + forward adapter. The domain base
+# cjm_graph_plugin_system.GraphPlugin dissolves; the data nouns come straight
+# from cjm_context_graph_primitives (graph-plugin-system only re-exported them).
+# get_plugin_metadata is gone -- name/version derive from importlib.metadata and
+# the default db_path from the substrate-injected per-capability PLUGIN_DATA_DIR.
+from cjm_plugin_system.core.capability import ToolCapability
+from cjm_plugin_system.core.errors import PluginInputError
 from cjm_plugin_system.utils.validation import (
     dict_to_config, config_to_dict, dataclass_to_jsonschema,
     SCHEMA_TITLE, SCHEMA_DESC
 )
-from cjm_graph_plugin_system.plugin_interface import GraphPlugin
-from cjm_graph_plugin_system.core import (
-    GraphNode, GraphEdge, GraphContext, SourceRef
-)
+
+from cjm_context_graph_primitives.provenance import SourceRef
+from cjm_context_graph_primitives.graph import GraphNode, GraphEdge, GraphContext
 # Stage 4: the typed query surface (expressions + results from the
 # data-primitives lib; per-backend translation owned by THIS plugin).
 from cjm_context_graph_primitives.query import (
@@ -35,9 +43,7 @@ from cjm_context_graph_primitives.query import (
 from cjm_graph_plugin_sqlite.query_translation import (
     translate_node_query, translate_edge_query,
 )
-import dataclasses
 
-from .meta import get_plugin_metadata
 
 # %% ../nbs/plugin.ipynb #6935e004
 @dataclass
@@ -59,7 +65,7 @@ class SQLiteGraphPluginConfig:
     )
 
 # %% ../nbs/plugin.ipynb #5b7e1ced
-class SQLiteGraphPlugin(GraphPlugin):
+class SQLiteGraphPlugin(ToolCapability):
     """Local, file-backed Context Graph implementation using SQLite."""
 
     config_class = SQLiteGraphPluginConfig
@@ -70,14 +76,20 @@ class SQLiteGraphPlugin(GraphPlugin):
         self._db_path: str = None
 
     @property
-    def name(self) -> str:  # Plugin name identifier
-        """Get the plugin name identifier."""
-        return get_plugin_metadata()["name"]
+    def name(self) -> str:  # Tool identity, derived from the installed distribution (PILLAR 1c)
+        """Get the tool name (the installed distribution name)."""
+        from importlib.metadata import metadata, packages_distributions
+        # `__package__` is None in a notebook/__main__ context, so guard the
+        # ffmpeg-template derivation with the known package module name.
+        pkg = __package__ or "cjm_graph_plugin_sqlite"
+        dist = (packages_distributions().get(pkg) or [pkg.replace("_", "-")])[0]
+        return metadata(dist)["Name"]
 
     @property
-    def version(self) -> str:  # Plugin version string
-        """Get the plugin version string."""
-        return get_plugin_metadata()["version"]
+    def version(self) -> str:  # Tool version
+        """Get the tool version string."""
+        from cjm_graph_plugin_sqlite import __version__
+        return __version__
 
     def get_current_config(self) -> Dict[str, Any]:  # Current configuration as dictionary
         """Return current configuration state."""
@@ -96,15 +108,32 @@ class SQLiteGraphPlugin(GraphPlugin):
         """Initialize DB connection and schema."""
         self.config = dict_to_config(SQLiteGraphPluginConfig, config or {})
 
-        # Determine DB path (Config override > Meta default)
-        meta_path = get_plugin_metadata()["db_path"]
-        self._db_path = self.config.db_path if self.config.db_path else meta_path
+        # Determine DB path (config override > substrate-injected default).
+        # The graph store IS this tool's persistence (unlike the compute tools
+        # whose cache moved to the adapter), so db_path stays a TOOL concern.
+        # The substrate owns the per-capability data-dir convention: it injects
+        # PLUGIN_DATA_DIR (= CJM_PLUGIN_DATA_DIR/<capability-name>), so the tool
+        # consumes that join rather than re-deriving it (PILLAR 1c verify-(c)).
+        self._db_path = self.config.db_path or self._default_db_path()
 
         self.logger.info(f"Initializing SQLite Graph at: {self._db_path}")
         # SG-41: a read-only graph must pre-exist; skip schema creation (the
         # read-only connection cannot run CREATE TABLE).
         if not self.config.readonly:
             self._init_db()
+
+    def _default_db_path(self) -> str:  # Default graph-store path (substrate-owned per-capability data dir)
+        """Resolve the default DB path from the substrate-injected per-capability
+        `PLUGIN_DATA_DIR` (= `CJM_PLUGIN_DATA_DIR/<capability-name>`). Falls back
+        to the same convention for direct/un-proxied use (e.g. notebook tests)."""
+        data_dir = os.environ.get("PLUGIN_DATA_DIR")
+        if not data_dir:
+            root = os.environ.get(
+                "CJM_PLUGIN_DATA_DIR", os.path.join(os.getcwd(), ".cjm", "data")
+            )
+            data_dir = os.path.join(root, "cjm-graph-plugin-sqlite")
+        os.makedirs(data_dir, exist_ok=True)
+        return os.path.join(data_dir, "context_graph.db")
 
     def _init_db(self) -> None:
         """Create tables and indices."""
@@ -231,120 +260,6 @@ class SQLiteGraphPlugin(GraphPlugin):
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
         )
-
-    # -------------------------------------------------------------------------
-    # EXECUTE - @plugin_action dispatcher (SG-44)
-    # -------------------------------------------------------------------------
-
-    def execute(
-        self,
-        action: str = "get_schema",  # Action to perform
-        **kwargs
-    ) -> Dict[str, Any]:  # JSON-serializable result
-        """Dispatch to the `@plugin_action`-tagged handler for `action` (SG-44).
-
-        Handlers are discovered by walking the class MRO for methods carrying a
-        `_plugin_action` tag (the same source `supported_actions` is built from
-        via `collect_plugin_actions`). Replaces the prior hand-maintained
-        if/elif chain.
-        """
-        return self.dispatch_to_action(action, **kwargs)
-
-    @plugin_action("get_schema")
-    def _action_get_schema(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> get_schema()."""
-        return self.get_schema()
-
-    @plugin_action("add_nodes")
-    def _action_add_nodes(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> add_nodes() (accepts dicts or GraphNode)."""
-        nodes_data = kwargs.get("nodes", [])
-        nodes = [self._dict_to_node(n) if isinstance(n, dict) else n for n in nodes_data]
-        ids = self.add_nodes(nodes)
-        return {"created_ids": ids, "count": len(ids)}
-
-    @plugin_action("add_edges")
-    def _action_add_edges(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> add_edges() (accepts dicts or GraphEdge)."""
-        edges_data = kwargs.get("edges", [])
-        edges = [self._dict_to_edge(e) if isinstance(e, dict) else e for e in edges_data]
-        ids = self.add_edges(edges)
-        return {"created_ids": ids, "count": len(ids)}
-
-    @plugin_action("get_node")
-    def _action_get_node(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> get_node()."""
-        node = self.get_node(kwargs["node_id"])
-        return {"node": node.to_dict() if node else None}
-
-    @plugin_action("get_edge")
-    def _action_get_edge(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> get_edge()."""
-        edge = self.get_edge(kwargs["edge_id"])
-        return {"edge": edge.to_dict() if edge else None}
-
-    @plugin_action("get_context")
-    def _action_get_context(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> get_context()."""
-        ctx = self.get_context(
-            kwargs["node_id"],
-            depth=kwargs.get("depth", 1),
-            filter_labels=kwargs.get("filter_labels"),
-        )
-        return ctx.to_dict()
-
-    @plugin_action("find_nodes_by_source")
-    def _action_find_nodes_by_source(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> find_nodes_by_source()."""
-        ref_data = kwargs["source_ref"]
-        ref = SourceRef.from_dict(ref_data) if isinstance(ref_data, dict) else ref_data
-        nodes = self.find_nodes_by_source(ref)
-        return {"nodes": [n.to_dict() for n in nodes], "count": len(nodes)}
-
-    @plugin_action("find_nodes_by_label")
-    def _action_find_nodes_by_label(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> find_nodes_by_label()."""
-        nodes = self.find_nodes_by_label(kwargs["label"], limit=kwargs.get("limit", 100))
-        return {"nodes": [n.to_dict() for n in nodes], "count": len(nodes)}
-
-    @plugin_action("update_node")
-    def _action_update_node(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> update_node()."""
-        return {"success": self.update_node(kwargs["node_id"], kwargs["properties"])}
-
-    @plugin_action("update_edge")
-    def _action_update_edge(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> update_edge()."""
-        return {"success": self.update_edge(kwargs["edge_id"], kwargs["properties"])}
-
-    @plugin_action("delete_nodes")
-    def _action_delete_nodes(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> delete_nodes()."""
-        count = self.delete_nodes(kwargs["node_ids"], cascade=kwargs.get("cascade", True))
-        return {"deleted_count": count}
-
-    @plugin_action("delete_edges")
-    def _action_delete_edges(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> delete_edges()."""
-        return {"deleted_count": self.delete_edges(kwargs["edge_ids"])}
-
-    @plugin_action("import_graph")
-    def _action_import_graph(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> import_graph() (dict or GraphContext)."""
-        graph_data = kwargs["graph_data"]
-        if isinstance(graph_data, dict):
-            graph_data = GraphContext.from_dict(graph_data)
-        return self.import_graph(graph_data, merge_strategy=kwargs.get("merge_strategy", "overwrite"))
-
-    @plugin_action("export_graph")
-    def _action_export_graph(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> export_graph()."""
-        return self.export_graph(filter_query=kwargs.get("filter_query")).to_dict()
-
-    @plugin_action("query")
-    def _action_query(self, **kwargs) -> Dict[str, Any]:
-        """Action wrapper -> query() (read-only SELECT)."""
-        return self.query(kwargs.get("sql", kwargs.get("query", "")), params=kwargs.get("params"))
 
     # -------------------------------------------------------------------------
     # CREATE
@@ -824,11 +739,6 @@ class SQLiteGraphPlugin(GraphPlugin):
         finally:
             con.close()
         return {"columns": columns, "rows": rows, "row_count": len(rows)}
-
-
-
-
-SQLiteGraphPlugin.supported_actions = collect_plugin_actions(SQLiteGraphPlugin)
 
 
 # %% ../nbs/plugin.ipynb #71efb595

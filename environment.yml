@@ -8,12 +8,12 @@ dependencies:
   - python=3.12
   - pip
   - pip:
-    # Core Infrastructure
-    - cjm-plugin-system
-    
-    # Tier 2 Interface
-    - cjm-graph-plugin-system
-    
+    # Stage 8 (Option C): the substrate is AUTO-INJECTED by install-all
+    # (schema v2), so it is no longer listed here. The tool depends only on the
+    # graph data nouns (cjm-context-graph-primitives), not the dissolved
+    # cjm-graph-plugin-system domain interface lib.
+    - cjm-context-graph-primitives
+
     # Utilities
     - fastcore
     
