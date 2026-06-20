@@ -1,6 +1,6 @@
-# Environment for cjm-graph-plugin-sqlite
+# Environment for cjm-graph-capability-sqlite
 # Provides a local, file-backed Context Graph implementation using SQLite
-name: cjm-graph-plugin-sqlite
+name: cjm-capability-graph-sqlite
 channels:
   - conda-forge
   - defaults
@@ -11,7 +11,7 @@ dependencies:
     # Stage 8 (Option C): the substrate is AUTO-INJECTED by install-all
     # (schema v2), so it is no longer listed here. The tool depends only on the
     # graph data nouns (cjm-context-graph-primitives), not the dissolved
-    # cjm-graph-plugin-system domain interface lib.
+    # cjm-graph-capability-system domain interface lib.
     - cjm-context-graph-primitives
 
     # Utilities
