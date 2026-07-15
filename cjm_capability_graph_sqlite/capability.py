@@ -104,10 +104,20 @@ class SQLiteGraphCapability(ToolCapability):
         return __version__
 
     def get_current_config(self) -> Dict[str, Any]:  # Current configuration as dictionary
-        """Return current configuration state."""
+        """Return current configuration state, with db_path RESOLVED to the effective path.
+
+        The raw config's db_path may be None/'' (manifest-default load) while the
+        capability resolves the real store at initialize (config override or the
+        substrate data-dir convention). Downstream cores derive run provenance and
+        the SIDECAR WRITE-JOURNAL path from this echo — reporting the raw None sent
+        pipeline writes UNJOURNALED (found live 2026-07-14, first journaled ingestion
+        run; the 6dfe00e9 scaffolding-as-defaults family / D19 lesson)."""
         if not self.config:
             return {}
-        return config_to_dict(self.config)
+        cfg = config_to_dict(self.config)
+        if getattr(self, "_db_path", None):
+            cfg["db_path"] = str(self._db_path)
+        return cfg
 
     def get_config_schema(self) -> Dict[str, Any]:  # JSON Schema for configuration
         """Return JSON Schema for UI generation."""
