@@ -291,17 +291,23 @@ class SQLiteGraphCapability(ToolCapability):
         self,
         nodes: List[GraphNode]  # Nodes to create
     ) -> List[str]:  # Created node IDs
-        """Bulk create nodes."""
+        """Bulk create nodes.
+
+        A node arriving with created_at/updated_at already set keeps them —
+        journal REPLAY restores temporal provenance this way (finding 0d50b921:
+        stamping now() here clamped every rebuilt node to rebuild time)."""
         ids = []
         now = time.time()
         with self._connect() as con:
             for n in nodes:
                 sources_json = json.dumps([s.to_dict() for s in n.sources])
                 props_json = json.dumps(n.properties)
+                created = n.created_at if n.created_at is not None else now
+                updated = n.updated_at if n.updated_at is not None else created
                 try:
                     con.execute(
                         "INSERT INTO nodes (id, label, properties, sources, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        (n.id, n.label, props_json, sources_json, now, now)
+                        (n.id, n.label, props_json, sources_json, created, updated)
                     )
                     ids.append(n.id)
                 except sqlite3.IntegrityError:
@@ -312,17 +318,21 @@ class SQLiteGraphCapability(ToolCapability):
         self,
         edges: List[GraphEdge]  # Edges to create
     ) -> List[str]:  # Created edge IDs
-        """Bulk create edges."""
+        """Bulk create edges.
+
+        Carried created_at/updated_at are honored like add_nodes (0d50b921)."""
         ids = []
         now = time.time()
         with self._connect() as con:
             con.execute("PRAGMA foreign_keys = ON;")
             for e in edges:
                 props_json = json.dumps(e.properties)
+                created = e.created_at if e.created_at is not None else now
+                updated = e.updated_at if e.updated_at is not None else created
                 try:
                     con.execute(
                         "INSERT INTO edges (id, source_id, target_id, relation_type, properties, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (e.id, e.source_id, e.target_id, e.relation_type, props_json, now, now)
+                        (e.id, e.source_id, e.target_id, e.relation_type, props_json, created, updated)
                     )
                     ids.append(e.id)
                 except sqlite3.IntegrityError as err:
