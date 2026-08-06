@@ -500,7 +500,14 @@ class SQLiteGraphCapability(ToolCapability):
         node_id: str,  # UUID of node to update
         properties: Dict[str, Any]  # Properties to merge/update
     ) -> bool:  # True if successful
-        """Partial update of node properties."""
+        """Partial update of node properties.
+
+        A reserved `updated_at` key in `properties` sets the COLUMN instead of
+        now() and never lands in the JSON blob — journal REPLAY restores a STATE
+        op's true time this way (0d50b921 residual: later-STATE nodes clamped
+        to rebuild time)."""
+        properties = dict(properties)
+        stamp = properties.pop("updated_at", None)
         with self._connect() as con:
             # Fetch existing to merge
             cur = con.execute("SELECT properties FROM nodes WHERE id = ?", (node_id,))
@@ -513,7 +520,7 @@ class SQLiteGraphCapability(ToolCapability):
 
             con.execute(
                 "UPDATE nodes SET properties = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(existing), time.time(), node_id)
+                (json.dumps(existing), stamp if stamp is not None else time.time(), node_id)
             )
             return True
 

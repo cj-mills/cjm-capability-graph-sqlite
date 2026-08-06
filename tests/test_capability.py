@@ -177,3 +177,27 @@ def test_typed_surface_smoke(cap):
     ctx = cap.export_graph(NodeQuery(label="Segment",
                                      related=RelationPredicate("PART_OF", node_id=doc)))
     assert len(ctx.nodes) == 3 and len(ctx.edges) == 2  # NEXT only (PART_OF targets the doc)
+
+
+def test_update_node_reserved_updated_at_sets_column(cap):
+    # 0d50b921 residual: a reserved `updated_at` key in the update payload sets
+    # the COLUMN (journal replay restores a STATE op's true time) and never
+    # lands in the JSON properties blob; without it, now()-stamping stands.
+    import json
+
+    nid = str(uuid.uuid4())
+    cap.add_nodes([GraphNode(id=nid, label="Person", properties={"name": "Ada"})])
+    assert cap.update_node(nid, {"role": "host", "updated_at": 1234.5})
+    con = sqlite3.connect(cap._db_path)
+    row = con.execute("SELECT properties, updated_at FROM nodes WHERE id = ?",
+                      (nid,)).fetchone()
+    con.close()
+    props = json.loads(row[0])
+    assert props["role"] == "host" and "updated_at" not in props
+    assert row[1] == 1234.5
+    # Without the reserved key the column re-stamps to now().
+    assert cap.update_node(nid, {"role": "guest"})
+    con = sqlite3.connect(cap._db_path)
+    row2 = con.execute("SELECT updated_at FROM nodes WHERE id = ?", (nid,)).fetchone()
+    con.close()
+    assert row2[0] > 1234.5
