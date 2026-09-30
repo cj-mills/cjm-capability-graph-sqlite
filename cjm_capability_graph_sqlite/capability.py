@@ -22,7 +22,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from cjm_capability_graph_sqlite.query_translation import translate_edge_query, translate_node_query
+from cjm_capability_graph_sqlite.query_translation import (decode_projected_row,
+                                                           EDGE_STRUCTURAL_KEYS,
+                                                           NODE_STRUCTURAL_KEYS,
+                                                           translate_edge_query,
+                                                           translate_node_query)
 from cjm_context_graph_primitives.graph import GraphContext, GraphEdge, GraphNode
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_context_graph_primitives.query import (EdgeQuery, EdgeQueryResult, NodeQuery,
@@ -838,7 +842,7 @@ def query_nodes(
         return NodeQueryResult(nodes=[self._row_to_node(r) for r in rows])
     out = []
     for r in rows:
-        d = dict(zip(keys, r))
+        d = decode_projected_row(keys, r, NODE_STRUCTURAL_KEYS)  # properties keep their JSON types
         if "sources" in d and d["sources"]:
             d["sources"] = json.loads(d["sources"])  # ref dicts (CR-19 shape)
         out.append(d)
@@ -861,7 +865,7 @@ def query_edges(
         con.close()
     if mode == "full":
         return EdgeQueryResult(edges=[self._row_to_edge(r) for r in rows])
-    return EdgeQueryResult(rows=[dict(zip(keys, r)) for r in rows])
+    return EdgeQueryResult(rows=[decode_projected_row(keys, r, EDGE_STRUCTURAL_KEYS) for r in rows])
 
 
 def raw_query(

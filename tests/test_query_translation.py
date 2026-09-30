@@ -8,7 +8,10 @@ import sqlite3
 
 import pytest
 
-from cjm_capability_graph_sqlite.query_translation import (translate_edge_query,
+from cjm_capability_graph_sqlite.query_translation import (EDGE_STRUCTURAL_KEYS,
+                                                           NODE_STRUCTURAL_KEYS,
+                                                           decode_projected_row,
+                                                           translate_edge_query,
                                                            translate_node_query)
 from cjm_context_graph_primitives.locators import FileRef
 from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, OrderBy,
@@ -71,7 +74,8 @@ def run(con, q):
         return cur.fetchone()[0]
     rows = cur.fetchall()
     if mode == "rows":
-        return [dict(zip(keys, r)) for r in rows]
+        structural = NODE_STRUCTURAL_KEYS if isinstance(q, NodeQuery) else EDGE_STRUCTURAL_KEYS
+        return [decode_projected_row(keys, r, structural) for r in rows]
     return rows
 
 
@@ -83,6 +87,21 @@ def test_spine_read_ordered_projection(con):
     assert [r["index"] for r in rows] == [0, 1, 2, 3]
     assert rows[0]["id"] == "s0"
     assert json.loads(rows[1]["sources"])[0]["content_hash"] == "sha256:ab"
+
+
+def test_projected_properties_keep_their_json_types(con):
+    # A projected object stays an object and a missing key is None (json_extract used to
+    # hand arrays and objects back as JSON TEXT — a projected list read as a string).
+    rows = run(con, NodeQuery(label="Correction", project=["payload", "correction_type"]))
+    by = {r["id"]: r for r in rows}
+    assert by["c1"]["payload"] == {"document_id": "doc-1", "segment_id": "s1"}
+    assert by["c2"]["correction_type"] == "text_content"
+    rows = run(con, NodeQuery(label="Segment", related=RelationPredicate("PART_OF", node_id="doc-1"),
+                              order_by=OrderBy(prop="index"), project=["text", "start_time"]))
+    assert [r["text"] for r in rows] == ["It's 100% real_deal", "hello world", "", None]
+    assert rows[1]["start_time"] == 1.0
+    rows = run(con, EdgeQuery(relation_type="REVIEWED", project=["decision"]))
+    assert rows == [{"id": "rev", "source_id": "sess-1", "target_id": "s0", "decision": "corrected"}]
 
 
 def test_structural_timestamp_projection(con):

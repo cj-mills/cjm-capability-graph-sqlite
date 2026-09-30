@@ -25,7 +25,11 @@ Translation rules:
   Projected node rows always carry `id` (+ `label`/`created_at`/`updated_at`
   projectable structurally — the storage stamps, never shadowed by a
   same-named property; `sources` projectable as parsed ref dicts); edge rows
-  always carry `id`/`source_id`/`target_id` (+ `relation_type` projectable)."""
+  always carry `id`/`source_id`/`target_id` (+ `relation_type` projectable).
+  A projected PROPERTY is selected as its JSON representation (`->`) and decoded
+  by the capability, so it keeps its type — a list stays a list, an object an
+  object (`json_extract` returned arrays and objects as JSON TEXT: a projected
+  `calls` list read as a string, the live code fold's index keyed characters)."""
 
 import json
 import re
@@ -238,7 +242,7 @@ def translate_node_query(
                 select_parts.append("n.sources")
                 keys.append("sources")
             else:
-                select_parts.append(f"json_extract(n.properties, {_json_path(name)})")
+                select_parts.append(f"n.properties -> {_json_path(name)}")
                 keys.append(name)
         tail = _order_limit_sql(q, "n.properties", params)
         return (f"SELECT {', '.join(select_parts)} FROM nodes AS n{where_sql}{tail}",
@@ -306,7 +310,7 @@ def translate_edge_query(
                 select_parts.append("e.relation_type")
                 keys.append("relation_type")
             else:
-                select_parts.append(f"json_extract(e.properties, {_json_path(name)})")
+                select_parts.append(f"e.properties -> {_json_path(name)}")
                 keys.append(name)
         tail = _order_limit_sql(q, "e.properties", params)
         return (f"SELECT {', '.join(select_parts)} FROM edges AS e{where_sql}{tail}",
@@ -315,3 +319,21 @@ def translate_edge_query(
     tail = _order_limit_sql(q, "e.properties", params)
     return (f"SELECT {EDGE_FULL_COLUMNS} FROM edges AS e{where_sql}{tail}",
             params, "full", None)
+
+
+# The structural columns a projection selects as-is; every other projected key is a property,
+# selected as JSON (`->`) and decoded by `decode_projected_row`.
+NODE_STRUCTURAL_KEYS = frozenset({"id", "label", "created_at", "updated_at", "sources"})
+EDGE_STRUCTURAL_KEYS = frozenset({"id", "source_id", "target_id", "relation_type"})
+
+
+def decode_projected_row(
+    keys: List[str],        # The projected keys, in select order
+    values: Any,            # One cursor row
+    structural: frozenset,  # The keys selected as plain columns
+) -> dict:  # The row: structural columns as-is, each property decoded to its JSON type (absent -> None)
+    """Zip a projected row, decoding every property column from its JSON representation."""
+    out = {}
+    for k, v in zip(keys, values):
+        out[k] = v if k in structural or v is None else json.loads(v)
+    return out
