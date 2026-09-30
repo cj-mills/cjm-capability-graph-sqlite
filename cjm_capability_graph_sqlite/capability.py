@@ -550,7 +550,13 @@ class SQLiteGraphCapability(ToolCapability):
         edge_id: str,  # UUID of edge to update
         properties: Dict[str, Any]  # Properties to merge/update
     ) -> bool:  # True if successful
-        """Partial update of edge properties."""
+        """Partial update of edge properties.
+
+        A reserved `updated_at` key in `properties` sets the COLUMN instead of now()
+        and never lands in the JSON blob — the op clock's stamp (design 8f6f2343),
+        exactly as `update_node` takes it."""
+        properties = dict(properties)
+        stamp = properties.pop("updated_at", None)
         with self._connect() as con:
             cur = con.execute("SELECT properties FROM edges WHERE id = ?", (edge_id,))
             row = cur.fetchone()
@@ -562,7 +568,7 @@ class SQLiteGraphCapability(ToolCapability):
 
             con.execute(
                 "UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(existing), time.time(), edge_id)
+                (json.dumps(existing), stamp if stamp is not None else time.time(), edge_id)
             )
             return True
 
@@ -651,7 +657,8 @@ class SQLiteGraphCapability(ToolCapability):
         nodes: List[GraphNode],  # Nodes to import
         merge_strategy: str  # "overwrite" | "skip" | "merge"
     ) -> int:  # Count of rows written (inserted or updated)
-        """Import nodes honoring merge_strategy (see import_graph)."""
+        """Import nodes honoring merge_strategy (see import_graph). Carried
+        created_at / updated_at are honored like add_nodes (0d50b921, design 8f6f2343)."""
         now = time.time()
         written = 0
         with self._connect() as con:
@@ -662,7 +669,10 @@ class SQLiteGraphCapability(ToolCapability):
                 if row is None:
                     con.execute(
                         "INSERT INTO nodes (id, label, properties, sources, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        (node.id, node.label, props_json, sources_json, now, now),
+                        (node.id, node.label, props_json, sources_json,
+                         node.created_at if node.created_at is not None else now,
+                         node.updated_at if node.updated_at is not None
+                         else (node.created_at if node.created_at is not None else now)),
                     )
                     written += 1
                 elif merge_strategy == "skip":
@@ -670,7 +680,8 @@ class SQLiteGraphCapability(ToolCapability):
                 elif merge_strategy == "overwrite":
                     con.execute(
                         "UPDATE nodes SET label = ?, properties = ?, sources = ?, updated_at = ? WHERE id = ?",
-                        (node.label, props_json, sources_json, now, node.id),
+                        (node.label, props_json, sources_json,
+                         node.updated_at if node.updated_at is not None else now, node.id),
                     )
                     written += 1
                 else:  # merge
@@ -686,7 +697,8 @@ class SQLiteGraphCapability(ToolCapability):
                             seen.add(key)
                     con.execute(
                         "UPDATE nodes SET label = ?, properties = ?, sources = ?, updated_at = ? WHERE id = ?",
-                        (node.label, json.dumps(merged_props), json.dumps(existing_sources), now, node.id),
+                        (node.label, json.dumps(merged_props), json.dumps(existing_sources),
+                         node.updated_at if node.updated_at is not None else now, node.id),
                     )
                     written += 1
         return written
@@ -696,7 +708,8 @@ class SQLiteGraphCapability(ToolCapability):
         edges: List[GraphEdge],  # Edges to import
         merge_strategy: str  # "overwrite" | "skip" | "merge"
     ) -> int:  # Count of rows written (inserted or updated)
-        """Import edges honoring merge_strategy (see import_graph)."""
+        """Import edges honoring merge_strategy (see import_graph). Carried
+        created_at / updated_at are honored like add_edges (0d50b921, design 8f6f2343)."""
         now = time.time()
         written = 0
         with self._connect() as con:
@@ -707,7 +720,10 @@ class SQLiteGraphCapability(ToolCapability):
                     try:
                         con.execute(
                             "INSERT INTO edges (id, source_id, target_id, relation_type, properties, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (edge.id, edge.source_id, edge.target_id, edge.relation_type, props_json, now, now),
+                            (edge.id, edge.source_id, edge.target_id, edge.relation_type, props_json,
+                             edge.created_at if edge.created_at is not None else now,
+                             edge.updated_at if edge.updated_at is not None
+                             else (edge.created_at if edge.created_at is not None else now)),
                         )
                         written += 1
                     except sqlite3.IntegrityError as err:
@@ -717,7 +733,8 @@ class SQLiteGraphCapability(ToolCapability):
                 elif merge_strategy == "overwrite":
                     con.execute(
                         "UPDATE edges SET source_id = ?, target_id = ?, relation_type = ?, properties = ?, updated_at = ? WHERE id = ?",
-                        (edge.source_id, edge.target_id, edge.relation_type, props_json, now, edge.id),
+                        (edge.source_id, edge.target_id, edge.relation_type, props_json,
+                         edge.updated_at if edge.updated_at is not None else now, edge.id),
                     )
                     written += 1
                 else:  # merge
@@ -725,7 +742,8 @@ class SQLiteGraphCapability(ToolCapability):
                     merged.update(edge.properties)
                     con.execute(
                         "UPDATE edges SET properties = ?, updated_at = ? WHERE id = ?",
-                        (json.dumps(merged), now, edge.id),
+                        (json.dumps(merged), edge.updated_at if edge.updated_at is not None else now,
+                         edge.id),
                     )
                     written += 1
         return written

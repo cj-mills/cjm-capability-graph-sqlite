@@ -221,3 +221,40 @@ def test_add_edges_aggregates_missing_endpoint_warnings(cap, caplog):
     msg = fk_lines[0].getMessage()
     assert "25 of 26" in msg and "sample:" in msg
     assert not any("Edge creation error (likely missing node)" in r.getMessage() for r in caplog.records)
+
+
+def test_update_edge_reserved_updated_at_sets_column(cap):
+    # The op clock (design 8f6f2343): update_edge takes the reserved `updated_at` exactly as
+    # update_node does — the COLUMN, never the JSON blob; without it, now()-stamping stands.
+    import json
+
+    a, b = str(uuid.uuid4()), str(uuid.uuid4())
+    cap.add_nodes([GraphNode(id=a, label="Person"), GraphNode(id=b, label="Person")])
+    eid = str(uuid.uuid4())
+    cap.add_edges([GraphEdge(id=eid, source_id=a, target_id=b, relation_type="KNOWS")])
+    assert cap.update_edge(eid, {"since": 1999, "updated_at": 1234.5})
+    con = sqlite3.connect(cap._db_path)
+    props, stamp = con.execute("SELECT properties, updated_at FROM edges WHERE id = ?",
+                               (eid,)).fetchone()
+    con.close()
+    assert json.loads(props) == {"since": 1999} and stamp == 1234.5
+    assert cap.update_edge(eid, {"since": 2000})
+    con = sqlite3.connect(cap._db_path)
+    (stamp2,) = con.execute("SELECT updated_at FROM edges WHERE id = ?", (eid,)).fetchone()
+    con.close()
+    assert stamp2 > 1234.5
+
+
+def test_import_honors_carried_times(cap):
+    # import_graph keeps carried created_at / updated_at like add_nodes / add_edges.
+    a, b = str(uuid.uuid4()), str(uuid.uuid4())
+    eid = str(uuid.uuid4())
+    cap.import_graph(GraphContext(
+        nodes=[GraphNode(id=a, label="P", created_at=10.0, updated_at=20.0),
+               GraphNode(id=b, label="P", created_at=30.0)],
+        edges=[GraphEdge(id=eid, source_id=a, target_id=b, relation_type="R", created_at=40.0)]))
+    con = sqlite3.connect(cap._db_path)
+    rows = dict((r[0], r[1:]) for r in con.execute("SELECT id, created_at, updated_at FROM nodes"))
+    erow = con.execute("SELECT created_at, updated_at FROM edges WHERE id = ?", (eid,)).fetchone()
+    con.close()
+    assert rows[a] == (10.0, 20.0) and rows[b] == (30.0, 30.0) and erow == (40.0, 40.0)
