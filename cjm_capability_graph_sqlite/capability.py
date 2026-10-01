@@ -82,6 +82,11 @@ class SQLiteGraphCapability(ToolCapability):
             FOREIGN KEY(source_id) REFERENCES nodes(id) ON DELETE CASCADE,
             FOREIGN KEY(target_id) REFERENCES nodes(id) ON DELETE CASCADE
         );
+
+        CREATE TABLE ingest_sources (  -- the source HEADs the rebuild ingested (DEC a9176261)
+            source TEXT PRIMARY KEY,
+            head TEXT NOT NULL
+        );
     """
 
     config_class = SQLiteGraphCapabilityConfig
@@ -211,6 +216,14 @@ class SQLiteGraphCapability(ToolCapability):
             # them up on the next initialize.
             con.execute("CREATE INDEX IF NOT EXISTS idx_edges_source_type ON edges(source_id, relation_type);")
             con.execute("CREATE INDEX IF NOT EXISTS idx_edges_target_type ON edges(target_id, relation_type);")
+            # The ingest record (DEC a9176261): the source HEADs this db was ingested from —
+            # provenance about the db itself, beside the graph and never in it.
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS ingest_sources (
+                    source TEXT PRIMARY KEY,
+                    head TEXT NOT NULL
+                )
+            """)
             # H7 companion: planner statistics. Without sqlite_stat1 the
             # correlated-probe plans pick the WRONG composite index (the
             # target-side probe scans a whole document's PART_OF rows per
@@ -903,7 +916,39 @@ def integrity_check(self) -> Dict[str, Any]:  # {"ok": bool, "errors": [...], "b
     return {"ok": ok, "errors": [] if ok else rows, "backend": "sqlite"}
 
 
+def record_ingest_sources(
+    self,
+    sources: Dict[str, str],  # source id -> the HEAD commit the ingest read
+) -> int:  # Sources recorded
+    """Record the source HEADs this db was ingested from, REPLACING any earlier record
+    (DEC a9176261). The rebuild writes it into the fresh db it builds, so the record and the
+    rows it describes swap in together; it is provenance about the db, not a graph row, so
+    it is neither stamped by the op clock nor seen by the write observer."""
+    rows = sorted((str(k), str(v)) for k, v in dict(sources).items())
+    with self._connect() as con:
+        con.execute("DELETE FROM ingest_sources")
+        con.executemany("INSERT INTO ingest_sources (source, head) VALUES (?, ?)", rows)
+    return len(rows)
+
+
+def ingest_sources(self) -> Dict[str, str]:  # source id -> HEAD; {} when the db holds no record
+    """The source HEADs this db was ingested from, on a fresh read-only connection. A db built
+    before the record existed has no table: it reads as no record, never as an error."""
+    con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+    try:
+        rows = con.execute("SELECT source, head FROM ingest_sources ORDER BY source").fetchall()
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e):
+            raise
+        rows = []
+    finally:
+        con.close()
+    return {s: h for s, h in rows}
+
+
 SQLiteGraphCapability.query_nodes = query_nodes
 SQLiteGraphCapability.query_edges = query_edges
 SQLiteGraphCapability.raw_query = raw_query
 SQLiteGraphCapability.integrity_check = integrity_check
+SQLiteGraphCapability.record_ingest_sources = record_ingest_sources
+SQLiteGraphCapability.ingest_sources = ingest_sources

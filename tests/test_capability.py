@@ -258,3 +258,30 @@ def test_import_honors_carried_times(cap):
     erow = con.execute("SELECT created_at, updated_at FROM edges WHERE id = ?", (eid,)).fetchone()
     con.close()
     assert rows[a] == (10.0, 20.0) and rows[b] == (30.0, 30.0) and erow == (40.0, 40.0)
+
+
+def test_ingest_record_replaces_reads_readonly_and_tolerates_a_legacy_db(cap, tmp_path):
+    """The ingest record (DEC a9176261): a replace, never a merge; beside the graph (no row,
+    no op-clock stamp); readable through a read-only open; a db built before the table
+    existed reads as no record."""
+    assert cap.ingest_sources() == {}
+    assert cap.record_ingest_sources({"archive:/site/posts": "a" * 40, "repo:/r/x": "b" * 40}) == 2
+    assert cap.record_ingest_sources({"repo:/r/x": "c" * 40}) == 1
+    assert cap.ingest_sources() == {"repo:/r/x": "c" * 40}
+    assert cap.get_schema()["counts"] == {}  # beside the graph, never in it
+
+    ro = SQLiteGraphCapability()
+    ro.initialize({"db_path": cap._db_path, "readonly": True})
+    assert ro.ingest_sources() == {"repo:/r/x": "c" * 40}
+    ro.cleanup()
+
+    legacy = str(tmp_path / "legacy.db")
+    con = sqlite3.connect(legacy)
+    con.execute("CREATE TABLE nodes (id TEXT PRIMARY KEY, label TEXT NOT NULL, properties JSON, "
+                "sources JSON, created_at REAL, updated_at REAL)")
+    con.commit()
+    con.close()
+    old = SQLiteGraphCapability()
+    old.initialize({"db_path": legacy, "readonly": True})
+    assert old.ingest_sources() == {}
+    old.cleanup()
