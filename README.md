@@ -6,6 +6,7 @@ A local, file-backed context-graph storage capability for the cjm-substrate runt
 
 ## Modules
 
+- **`cjm_capability_graph_sqlite.__init__`**
 - **`cjm_capability_graph_sqlite.capability`** — Capability implementation for Context Graph using SQLite.
 - **`cjm_capability_graph_sqlite.query_translation`** — The per-backend translation of the typed query expressions (pass-2 Thread 5; stage 4): NodeQuery/EdgeQuery -> parameterized SQLite SQL over the nodes/edges schema. THIS module is what makes the typed surface portable - the expression is domain- and backend-neutral; every backend tool owns a translation like this one (the ratified stage-4 split: backend owns translation; the adapter stays generic). Pure functions, unit-tested against an in-memory DB with the production schema - no capability runtime needed.
 
@@ -15,13 +16,16 @@ A local, file-backed context-graph storage capability for the cjm-substrate runt
 
 - `SQLiteGraphCapability` _class_ — Local, file-backed Context Graph implementation using SQLite.
 - `SQLiteGraphCapabilityConfig` _class_ — Configuration for SQLite Graph Capability.
+- `ingest_sources` _function_ — The source HEADs this db was ingested from, on a fresh read-only connection. A db built
 - `integrity_check` _function_ — Backend self-check (stage 4; the G3 corruption find institutionalized):
 - `query_edges` _function_ — Execute a typed edge query (stage 4) — same contract as `query_nodes`.
 - `query_nodes` _function_ — Execute a typed node query (stage 4) — translated to parameterized SQL
 - `raw_query` _function_ — Execute the raw escape — refuses backend mismatches (non-portable by
+- `record_ingest_sources` _function_ — Record the source HEADs this db was ingested from, REPLACING any earlier record
 
 ### `cjm_capability_graph_sqlite.query_translation`
 
+- `decode_projected_row` _function_ — Zip a projected row, decoding every property column from its JSON representation.
 - `translate_edge_query` _function_ — Translate an `EdgeQuery` to parameterized SQLite SQL.
 - `translate_node_query` _function_ — Translate a `NodeQuery` to parameterized SQLite SQL.
 
