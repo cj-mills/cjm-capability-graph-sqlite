@@ -40,6 +40,7 @@ from cjm_substrate.utils.validation import (config_to_dict, dataclass_to_jsonsch
 @dataclass
 class SQLiteGraphCapabilityConfig:
     """Configuration for SQLite Graph Capability."""
+
     db_path: Optional[str] = field(
         default=None,
         metadata={
