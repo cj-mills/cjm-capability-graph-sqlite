@@ -3,20 +3,19 @@
 Projected from the query_translation notebook's behavior-test cell at the
 c25780e8 flip: the translation contract is verified against the PRODUCTION
 schema in an in-memory DB — by what it returns, not by SQL strings."""
+
 import json
 import sqlite3
 
 import pytest
-
-from cjm_capability_graph_sqlite.query_translation import (EDGE_STRUCTURAL_KEYS,
+from cjm_capability_graph_sqlite.query_translation import (decode_projected_row,
+                                                           EDGE_STRUCTURAL_KEYS,
                                                            NODE_STRUCTURAL_KEYS,
-                                                           decode_projected_row,
                                                            translate_edge_query,
                                                            translate_node_query)
 from cjm_context_graph_primitives.locators import FileRef
-from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, OrderBy,
-                                                PropertyPredicate, RelationPredicate,
-                                                SourcePredicate)
+from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, OrderBy, PropertyPredicate,
+                                                RelationPredicate, SourcePredicate)
 from cjm_substrate.core.errors import CapabilityInputError
 
 

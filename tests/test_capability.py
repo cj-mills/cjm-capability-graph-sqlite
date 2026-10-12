@@ -3,18 +3,17 @@
 Projected from the capability notebook's demo/test cells at the c25780e8 flip:
 the CRUD/round-trip walk, the SG-41 smells (WAL / readonly / guarded query /
 merge_strategy), and the stage-4 typed-surface smoke test."""
+
 import sqlite3
 import uuid
 
 import pytest
-
 from cjm_capability_graph_sqlite.capability import SQLiteGraphCapability
 from cjm_context_graph_primitives.graph import GraphContext, GraphEdge, GraphNode
 from cjm_context_graph_primitives.locators import FileRef
 from cjm_context_graph_primitives.provenance import SourceRef
-from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, OrderBy,
-                                                PropertyPredicate, RawQuery,
-                                                RelationPredicate)
+from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, OrderBy, PropertyPredicate,
+                                                RawQuery, RelationPredicate)
 from cjm_context_graph_primitives.slices import FullContent
 from cjm_substrate.core.errors import CapabilityInputError
 
