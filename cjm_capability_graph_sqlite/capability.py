@@ -698,6 +698,12 @@ class SQLiteGraphCapability(ToolCapability):
             for row in cur:
                 schema["counts"][row[0]] = row[1]
 
+            # The edge total and the store's size: the growth covariates the instrument stamps
+            # on every timing event (design detail 681604c1); each is O(1) or one index count
+            schema["edge_count"] = con.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+            schema["db_bytes"] = (con.execute("PRAGMA page_count").fetchone()[0]
+                                  * con.execute("PRAGMA page_size").fetchone()[0])
+
         return schema
 
     def import_graph(

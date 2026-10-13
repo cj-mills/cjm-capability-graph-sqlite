@@ -77,6 +77,7 @@ def test_crud_roundtrip_and_provenance(cap, tmp_path):
     assert sorted(schema["node_labels"]) == ["Concept", "Person"]
     assert sorted(schema["edge_types"]) == ["KNOWS", "MENTIONS"]
     assert schema["counts"]["Person"] == 2
+    assert schema["edge_count"] == 3 and schema["db_bytes"] > 0  # the instrument's covariates (681604c1)
 
     cap.update_node(alice_id, {"role": "host", "verified": True})
     assert cap.get_node(alice_id).properties["role"] == "host"
