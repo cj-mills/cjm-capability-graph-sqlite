@@ -19,8 +19,9 @@ import logging
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from cjm_capability_graph_sqlite.query_translation import (decode_projected_row,
                                                            EDGE_STRUCTURAL_KEYS,
@@ -174,8 +175,9 @@ class SQLiteGraphCapability(ToolCapability):
         return os.path.join(data_dir, "context_graph.db")
 
     def _init_db(self) -> None:
-        """Create tables and indices."""
-        with self._connect() as con:
+        """Create tables and indices -- the schema only. Statistics are written by the
+        paths that change data (`_writing`), never by an open (finding ff3ede3d)."""
+        with self._writing() as con:
             # Enable Foreign Keys
             con.execute("PRAGMA foreign_keys = ON;")
 
@@ -190,7 +192,11 @@ class SQLiteGraphCapability(ToolCapability):
                     updated_at REAL
                 )
             """)
-            con.execute("CREATE INDEX IF NOT EXISTS idx_nodes_label ON nodes(label);")
+            # (label, id): a label read in id order -- a keyset page, a bounded read -- is a
+            # range scan, never a sort of the whole label (findings a107e2f3 / ae2b196e); it
+            # serves a label-only lookup too, so the label-only index it replaces is dropped.
+            con.execute("CREATE INDEX IF NOT EXISTS idx_nodes_label_id ON nodes(label, id);")
+            con.execute("DROP INDEX IF EXISTS idx_nodes_label;")
 
             # Edges Table
             con.execute("""
@@ -228,15 +234,10 @@ class SQLiteGraphCapability(ToolCapability):
             # H7 companion: planner statistics. Without sqlite_stat1 the
             # correlated-probe plans pick the WRONG composite index (the
             # target-side probe scans a whole document's PART_OF rows per
-            # outer row: 5s; source-side probe: 8ms at corpus scale).
-            # Cheap (~40ms at 13k segments); writable opens only. Guarded:
-            # stats are an OPTIMIZATION — a corrupted DB must still LOAD so
-            # integrity_check (the designed G3 gate) can diagnose it, never
-            # fail at initialize via a stats side-effect.
-            try:
-                con.execute("ANALYZE;")
-            except sqlite3.DatabaseError as e:
-                logging.warning(f"ANALYZE skipped (run integrity_check): {e}")
+            # outer row: 5s; source-side probe: 8ms at corpus scale). They are
+            # kept by `_writing`'s PRAGMA optimize at the close of every write,
+            # this one included (a new index is analyzed there) -- no longer a
+            # full ANALYZE per open, O(db) on every read (finding ff3ede3d).
 
     def _connect(self) -> sqlite3.Connection:  # Open DB connection (honors readonly; sets WAL + FKs)
         """Open a SQLite connection honoring the `readonly` config (SG-41).
@@ -253,6 +254,28 @@ class SQLiteGraphCapability(ToolCapability):
             con.execute("PRAGMA journal_mode=WAL;")
         con.execute("PRAGMA foreign_keys = ON;")
         return con
+
+    @contextmanager
+    def _writing(self) -> Iterator[sqlite3.Connection]:  # One unit of write work: commit, planner upkeep, close
+        """Open a connection for one unit of write work: commit on success (roll back on
+        error), then keep the planner's statistics current, then close.
+
+        Statistics are written on the paths that change data, never on an open (finding
+        ff3ede3d: a read paid a full ANALYZE and took the write lock). PRAGMA optimize
+        analyzes a table only when it was never analyzed, gained an index, or moved ~10x
+        in size since, so a steady-state write pays a no-op check and a fresh rebuild db
+        gains statistics as it fills. Guarded: statistics are an OPTIMIZATION — a corrupted
+        DB must still answer integrity_check (the designed G3 gate)."""
+        con = self._connect()
+        try:
+            with con:
+                yield con
+            try:
+                con.execute("PRAGMA optimize=0x10002;")
+            except sqlite3.DatabaseError as e:
+                logging.warning(f"PRAGMA optimize skipped (run integrity_check): {e}")
+        finally:
+            con.close()
 
     # -------------------------------------------------------------------------
     # Helpers
@@ -322,7 +345,7 @@ class SQLiteGraphCapability(ToolCapability):
         stamping now() here clamped every rebuilt node to rebuild time)."""
         ids = []
         now = time.time()
-        with self._connect() as con:
+        with self._writing() as con:
             for n in nodes:
                 sources_json = json.dumps([s.to_dict() for s in n.sources])
                 props_json = json.dumps(n.properties)
@@ -354,7 +377,7 @@ class SQLiteGraphCapability(ToolCapability):
         ids = []
         now = time.time()
         missing: List[Tuple[str, str, str]] = []  # (source_id, target_id, relation_type) of FK-skipped edges
-        with self._connect() as con:
+        with self._writing() as con:
             con.execute("PRAGMA foreign_keys = ON;")
             for e in edges:
                 props_json = json.dumps(e.properties)
@@ -437,11 +460,13 @@ class SQLiteGraphCapability(ToolCapability):
         label: str,  # Node label to search for
         limit: int = 100  # Max results
     ) -> List[GraphNode]:  # Matching nodes
-        """Find nodes by label."""
+        """Find nodes by label, in id order: a bounded read sorts before it limits, so a
+        page is never an arbitrary subset (finding a107e2f3)."""
         results = []
         with self._connect() as con:
             cur = con.execute(
-                "SELECT id, label, properties, sources, created_at, updated_at FROM nodes WHERE label = ? LIMIT ?",
+                "SELECT id, label, properties, sources, created_at, updated_at FROM nodes "
+                "WHERE label = ? ORDER BY id LIMIT ?",
                 (label, limit)
             )
             for row in cur:
@@ -547,7 +572,7 @@ class SQLiteGraphCapability(ToolCapability):
         to rebuild time)."""
         properties = dict(properties)
         stamp = properties.pop("updated_at", None)
-        with self._connect() as con:
+        with self._writing() as con:
             # Fetch existing to merge
             cur = con.execute("SELECT properties FROM nodes WHERE id = ?", (node_id,))
             row = cur.fetchone()
@@ -575,7 +600,7 @@ class SQLiteGraphCapability(ToolCapability):
         exactly as `update_node` takes it."""
         properties = dict(properties)
         stamp = properties.pop("updated_at", None)
-        with self._connect() as con:
+        with self._writing() as con:
             cur = con.execute("SELECT properties FROM edges WHERE id = ?", (edge_id,))
             row = cur.fetchone()
             if not row:
@@ -600,7 +625,7 @@ class SQLiteGraphCapability(ToolCapability):
         cascade: bool = True  # Also delete connected edges
     ) -> int:  # Number of nodes deleted
         """Delete nodes (and optionally connected edges)."""
-        with self._connect() as con:
+        with self._writing() as con:
             if cascade:
                 con.execute("PRAGMA foreign_keys = ON;")  # Ensures cascade works
             else:
@@ -618,7 +643,7 @@ class SQLiteGraphCapability(ToolCapability):
         edge_ids: List[str]  # UUIDs of edges to delete
     ) -> int:  # Number of edges deleted
         """Delete edges."""
-        with self._connect() as con:
+        with self._writing() as con:
             placeholders = ','.join('?' for _ in edge_ids)
             cur = con.execute(
                 f"DELETE FROM edges WHERE id IN ({placeholders})",
@@ -679,7 +704,7 @@ class SQLiteGraphCapability(ToolCapability):
         created_at / updated_at are honored like add_nodes (0d50b921, design 8f6f2343)."""
         now = time.time()
         written = 0
-        with self._connect() as con:
+        with self._writing() as con:
             for node in nodes:
                 props_json = json.dumps(node.properties)
                 sources_json = json.dumps([s.to_dict() for s in node.sources])
@@ -730,7 +755,7 @@ class SQLiteGraphCapability(ToolCapability):
         created_at / updated_at are honored like add_edges (0d50b921, design 8f6f2343)."""
         now = time.time()
         written = 0
-        with self._connect() as con:
+        with self._writing() as con:
             for edge in edges:
                 props_json = json.dumps(edge.properties)
                 row = con.execute("SELECT properties FROM edges WHERE id = ?", (edge.id,)).fetchone()
@@ -926,7 +951,7 @@ def record_ingest_sources(
     rows it describes swap in together; it is provenance about the db, not a graph row, so
     it is neither stamped by the op clock nor seen by the write observer."""
     rows = sorted((str(k), str(v)) for k, v in dict(sources).items())
-    with self._connect() as con:
+    with self._writing() as con:
         con.execute("DELETE FROM ingest_sources")
         con.executemany("INSERT INTO ingest_sources (source, head) VALUES (?, ?)", rows)
     return len(rows)

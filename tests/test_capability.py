@@ -139,6 +139,34 @@ def test_sg41_wal_query_guard_merge_readonly(tmp_path):
     ro.cleanup()
 
 
+def test_reads_and_opens_never_write_writes_keep_statistics(tmp_path):
+    # Finding ff3ede3d: statistics are written by the paths that change data (PRAGMA
+    # optimize at the close of each write), so an open or a read commits nothing -- an
+    # observer's data_version moves only when ANOTHER connection commits.
+    db = str(tmp_path / "stats.db")
+    w = SQLiteGraphCapability()
+    w.initialize({"db_path": db})
+    indexes = {r[0] for r in sqlite3.connect(db).execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert "idx_nodes_label_id" in indexes and "idx_nodes_label" not in indexes
+    w.add_nodes([GraphNode(id=f"n{i:03d}", label="Doc", properties={"i": i}) for i in range(50)])
+    stats = {r[0] for r in sqlite3.connect(db).execute(
+        "SELECT idx FROM sqlite_stat1 WHERE tbl = 'nodes'")}
+    assert "idx_nodes_label_id" in stats
+    w.cleanup()
+
+    observer = sqlite3.connect(db)
+    before = observer.execute("PRAGMA data_version").fetchone()[0]
+    for readonly in (True, False):
+        r = SQLiteGraphCapability()
+        r.initialize({"db_path": db, "readonly": readonly})
+        assert [n.id for n in r.find_nodes_by_label("Doc", limit=3)] == ["n000", "n001", "n002"]
+        assert r.query_nodes(NodeQuery(label="Doc", count=True)).count == 50
+        r.cleanup()
+    assert observer.execute("PRAGMA data_version").fetchone()[0] == before
+    observer.close()
+
+
 def test_typed_surface_smoke(cap):
     doc = str(uuid.uuid4())
     segs = [str(uuid.uuid4()) for _ in range(3)]

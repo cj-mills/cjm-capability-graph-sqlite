@@ -181,6 +181,27 @@ def test_ne_order_desc_limit_and_paging(con):
     assert [r[0] for r in rows] == ["s1", "s2"]
 
 
+def test_keyset_pages_and_deterministic_bounded_order(con):
+    # The keyset cursor (finding ae2b196e): a page is the rows after the last id seen, in
+    # id order, so a pass over the whole answer visits every row exactly once.
+    every = sorted(r["id"] for r in run(con, NodeQuery(label="Segment", project=[])))
+    seen, after = [], None
+    while True:
+        rows = run(con, NodeQuery(label="Segment", project=[], limit=2, after=after))
+        seen.extend(r["id"] for r in rows)
+        if len(rows) < 2:
+            break
+        after = rows[-1]["id"]
+    assert seen == every
+    # A bounded read with no ordering is ordered by id, never an arbitrary subset
+    # (finding a107e2f3); a property ordering breaks its ties on the id.
+    assert [r[0] for r in run(con, NodeQuery(label="Segment", limit=3))] == every[:3]
+    tied = run(con, NodeQuery(label="Segment", where=[PropertyPredicate("index", "eq", 0)],
+                              order_by=OrderBy(prop="index")))
+    assert [r[0] for r in tied] == ["other", "s0"]
+    assert [r[0] for r in run(con, EdgeQuery(relation_type="NEXT", after="n0"))] == ["n1", "nx"]
+
+
 def test_in_op_ids_batch_and_top_level_source(con):
     rows = run(con, NodeQuery(label="Segment", where=[PropertyPredicate("index", "in", [0, 2])],
                               related=RelationPredicate("PART_OF", node_id="doc-1")))

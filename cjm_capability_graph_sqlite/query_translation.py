@@ -171,16 +171,22 @@ EDGE_FULL_COLUMNS = "e.id, e.source_id, e.target_id, e.relation_type, e.properti
 
 
 def _order_limit_sql(
-    query,  # NodeQuery or EdgeQuery (order_by / limit / offset fields)
+    query,  # NodeQuery or EdgeQuery (order_by / limit / offset / after fields)
     props_col: str,  # Properties column expression for ORDER BY paths
+    id_col: str,  # Row id column: the keyset key and the tie-break
     params: List[Any],  # Bound-params list (appended in place)
 ) -> str:  # ORDER BY / LIMIT / OFFSET tail
-    """Compile the shared ordering + paging tail."""
+    """Compile the shared ordering + paging tail. A property ordering breaks ties on the
+    id, and a bounded or keyset read with no ordering is ordered by the id, so a page is
+    never an arbitrary subset (findings a107e2f3 / ae2b196e)."""
     tail = ""
     if query.order_by is not None:
         tail += (f" ORDER BY json_extract({props_col}, "
                  f"{_json_path(query.order_by.prop)})"
-                 + (" DESC" if query.order_by.descending else " ASC"))
+                 + (" DESC" if query.order_by.descending else " ASC")
+                 + f", {id_col}")
+    elif query.limit is not None or query.offset or query.after is not None:
+        tail += f" ORDER BY {id_col}"
     if query.limit is not None or query.offset:
         tail += " LIMIT ?"
         params.append(query.limit if query.limit is not None else -1)
@@ -206,6 +212,9 @@ def translate_node_query(
     if q.ids is not None:
         where.append("n.id IN (SELECT value FROM json_each(?))")
         params.append(json.dumps(list(q.ids)))
+    if q.after is not None:
+        where.append("n.id > ?")
+        params.append(q.after)
     if q.label is not None:
         where.append("n.label = ?")
         params.append(q.label)
@@ -244,11 +253,11 @@ def translate_node_query(
             else:
                 select_parts.append(f"n.properties -> {_json_path(name)}")
                 keys.append(name)
-        tail = _order_limit_sql(q, "n.properties", params)
+        tail = _order_limit_sql(q, "n.properties", "n.id", params)
         return (f"SELECT {', '.join(select_parts)} FROM nodes AS n{where_sql}{tail}",
                 params, "rows", keys)
 
-    tail = _order_limit_sql(q, "n.properties", params)
+    tail = _order_limit_sql(q, "n.properties", "n.id", params)
     return (f"SELECT {NODE_FULL_COLUMNS} FROM nodes AS n{where_sql}{tail}",
             params, "full", None)
 
@@ -268,6 +277,9 @@ def translate_edge_query(
     if q.ids is not None:
         where.append("e.id IN (SELECT value FROM json_each(?))")
         params.append(json.dumps(list(q.ids)))
+    if q.after is not None:
+        where.append("e.id > ?")
+        params.append(q.after)
     if q.relation_type is not None:
         where.append("e.relation_type = ?")
         params.append(q.relation_type)
@@ -312,11 +324,11 @@ def translate_edge_query(
             else:
                 select_parts.append(f"e.properties -> {_json_path(name)}")
                 keys.append(name)
-        tail = _order_limit_sql(q, "e.properties", params)
+        tail = _order_limit_sql(q, "e.properties", "e.id", params)
         return (f"SELECT {', '.join(select_parts)} FROM edges AS e{where_sql}{tail}",
                 params, "rows", keys)
 
-    tail = _order_limit_sql(q, "e.properties", params)
+    tail = _order_limit_sql(q, "e.properties", "e.id", params)
     return (f"SELECT {EDGE_FULL_COLUMNS} FROM edges AS e{where_sql}{tail}",
             params, "full", None)
 
