@@ -16,6 +16,7 @@ A local, file-backed context-graph storage capability for the cjm-substrate runt
 
 - `SQLiteGraphCapability` _class_ — Local, file-backed Context Graph implementation using SQLite.
 - `SQLiteGraphCapabilityConfig` _class_ — Configuration for SQLite Graph Capability.
+- `explain_query` _function_ — The planner's answer for a typed query, without running it -- the instrument's plan
 - `ingest_sources` _function_ — The source HEADs this db was ingested from, on a fresh read-only connection. A db built
 - `integrity_check` _function_ — Backend self-check (stage 4; the G3 corruption find institutionalized):
 - `query_edges` _function_ — Execute a typed edge query (stage 4) — same contract as `query_nodes`.

@@ -17,6 +17,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -1004,9 +1005,42 @@ def ingest_sources(self) -> Dict[str, str]:  # source id -> HEAD; {} when the db
     return {s: h for s, h in rows}
 
 
+def explain_query(
+    self,
+    query: Union[NodeQuery, EdgeQuery],  # The typed query to plan (never run)
+) -> Dict[str, Any]:  # {plan: [detail, ...], scans: ["nodes" | "edges" | "nodes:label", ...]}
+    """The planner's answer for a typed query, without running it -- the instrument's plan
+    guard (design detail 3bd8673d, 681604c1): EXPLAIN QUERY PLAN over the same translation
+    `query_nodes` / `query_edges` run. `scans` names each graph table the plan reads WHOLE
+    (`SCAN`, with or without an index) and `nodes:label` when the only access to nodes is the
+    label range while property predicates filter it row by row -- a read whose cost is the
+    kind's size, whatever the answer."""
+    edge = isinstance(query, EdgeQuery)
+    sql, params, _mode, _keys = translate_edge_query(query) if edge else translate_node_query(query)
+    tables = {alias: table for table, alias in re.findall(r"\b(nodes|edges) AS (\w+)", sql)}
+    con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+    try:
+        plan = [str(r[-1]) for r in con.execute("EXPLAIN QUERY PLAN " + sql, params)]
+    finally:
+        con.close()
+    scans = set()
+    for detail in plan:
+        m = re.match(r"(SCAN|SEARCH) (\w+)", detail)
+        table = m and tables.get(m.group(2), m.group(2))
+        if not m or table not in ("nodes", "edges"):
+            continue
+        if m.group(1) == "SCAN":
+            scans.add(table)
+        elif (not edge and table == "nodes" and "(label=?)" in detail and query.where
+              and not query.ids):
+            scans.add("nodes:label")
+    return {"plan": plan, "scans": sorted(scans)}
+
+
 SQLiteGraphCapability.query_nodes = query_nodes
 SQLiteGraphCapability.query_edges = query_edges
 SQLiteGraphCapability.raw_query = raw_query
 SQLiteGraphCapability.integrity_check = integrity_check
 SQLiteGraphCapability.record_ingest_sources = record_ingest_sources
 SQLiteGraphCapability.ingest_sources = ingest_sources
+SQLiteGraphCapability.explain_query = explain_query

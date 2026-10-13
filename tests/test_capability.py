@@ -335,3 +335,24 @@ def test_ingest_record_replaces_reads_readonly_and_tolerates_a_legacy_db(cap, tm
     old.initialize({"db_path": legacy, "readonly": True})
     assert old.ingest_sources() == {}
     old.cleanup()
+
+
+def test_explain_names_the_whole_reads_and_runs_nothing(cap):
+    # The plan guard's seam (design detail 3bd8673d): a query's plan without running it --
+    # a table SCAN, a label range filtered row by row, and the selective reads that are neither
+    # a spread of kinds, so the planner (with the statistics the write keeps) reads a kind
+    # through its label range rather than scanning a toy table
+    cap.add_nodes([GraphNode(id=str(uuid.uuid4()), label=f"K{i % 20}", properties={"slot_id": "s"})
+                   for i in range(400)]
+                  + [GraphNode(id=str(uuid.uuid4()), label="Assertion", properties={"slot_id": "s"})])
+    def scans(q):
+        return cap.explain_query(q)["scans"]
+    assert scans(NodeQuery(project=["id"])) == ["nodes"]
+    assert scans(EdgeQuery()) == ["edges"]
+    assert scans(NodeQuery(label="Assertion",
+                           where=[PropertyPredicate("slot_id", "eq", "s")])) == ["nodes:label"]
+    assert scans(NodeQuery(label="Assertion")) == []  # a whole kind, read by its own range
+    assert scans(NodeQuery(ids=["x"])) == []
+    assert scans(EdgeQuery(source_ids=["x"])) == []
+    plan = cap.explain_query(EdgeQuery())["plan"]
+    assert plan and all(isinstance(d, str) for d in plan)
