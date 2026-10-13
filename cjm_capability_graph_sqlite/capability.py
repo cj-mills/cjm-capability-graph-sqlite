@@ -235,7 +235,7 @@ class SQLiteGraphCapability(ToolCapability):
             # correlated-probe plans pick the WRONG composite index (the
             # target-side probe scans a whole document's PART_OF rows per
             # outer row: 5s; source-side probe: 8ms at corpus scale). They are
-            # kept by `_writing`'s PRAGMA optimize at the close of every write,
+            # kept by `_writing`'s statistics rule at the close of every write,
             # this one included (a new index is analyzed there) -- no longer a
             # full ANALYZE per open, O(db) on every read (finding ff3ede3d).
 
@@ -261,21 +261,47 @@ class SQLiteGraphCapability(ToolCapability):
         error), then keep the planner's statistics current, then close.
 
         Statistics are written on the paths that change data, never on an open (finding
-        ff3ede3d: a read paid a full ANALYZE and took the write lock). PRAGMA optimize
-        analyzes a table only when it was never analyzed, gained an index, or moved ~10x
-        in size since, so a steady-state write pays a no-op check and a fresh rebuild db
-        gains statistics as it fills. Guarded: statistics are an OPTIMIZATION — a corrupted
-        DB must still answer integrity_check (the designed G3 gate)."""
+        ff3ede3d: a read paid a full ANALYZE and took the write lock): `_refresh_statistics`
+        analyzes a table only when its statistics are missing or stale, so a steady-state write
+        pays a ~0.01 ms check and a fresh rebuild db gains statistics as it fills. Guarded:
+        statistics are an OPTIMIZATION — a corrupted DB must still answer integrity_check (the
+        designed G3 gate)."""
         con = self._connect()
         try:
             with con:
                 yield con
             try:
-                con.execute("PRAGMA optimize=0x10002;")
+                self._refresh_statistics(con)
             except sqlite3.DatabaseError as e:
-                logging.warning(f"PRAGMA optimize skipped (run integrity_check): {e}")
+                logging.warning(f"statistics skipped (run integrity_check): {e}")
         finally:
             con.close()
+
+    def _refresh_statistics(
+        self,
+        con: sqlite3.Connection,  # A write connection, after its unit of work committed
+    ) -> None:
+        """Analyze each graph table whose planner statistics are missing or stale: an index
+        with no sqlite_stat1 row (never analyzed, or created since), or a size ~10x the
+        analyzed one (max(rowid), an O(log n) estimate). One rule on every SQLite: PRAGMA
+        optimize analyzes a never-analyzed table only from SQLite 3.46 on, so on 3.45 (CI's
+        Ubuntu 24.04) the write path kept no statistics at all -- the guard of the 162 s
+        planner regression gone."""
+        for table in ("nodes", "edges"):
+            rows = con.execute(f"SELECT max(rowid) FROM {table}").fetchone()[0] or 0
+            if not rows:
+                continue
+            indexes = {r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?", (table,))}
+            try:
+                stats = dict(con.execute(
+                    "SELECT idx, stat FROM sqlite_stat1 WHERE tbl = ?", (table,)).fetchall())
+            except sqlite3.OperationalError:  # no sqlite_stat1 yet: never analyzed
+                stats = {}
+            analyzed = max((int(str(s).split()[0]) for s in stats.values() if s), default=0)
+            if indexes - set(stats) or rows >= 10 * max(analyzed, 1):
+                con.execute(f"ANALYZE {table};")
+                con.commit()
 
     # -------------------------------------------------------------------------
     # Helpers

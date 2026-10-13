@@ -140,8 +140,8 @@ def test_sg41_wal_query_guard_merge_readonly(tmp_path):
 
 
 def test_reads_and_opens_never_write_writes_keep_statistics(tmp_path):
-    # Finding ff3ede3d: statistics are written by the paths that change data (PRAGMA
-    # optimize at the close of each write), so an open or a read commits nothing -- an
+    # Finding ff3ede3d: statistics are written by the paths that change data (the
+    # statistics rule at the close of each write), so an open or a read commits nothing -- an
     # observer's data_version moves only when ANOTHER connection commits.
     db = str(tmp_path / "stats.db")
     w = SQLiteGraphCapability()
@@ -165,6 +165,28 @@ def test_reads_and_opens_never_write_writes_keep_statistics(tmp_path):
         r.cleanup()
     assert observer.execute("PRAGMA data_version").fetchone()[0] == before
     observer.close()
+
+
+def test_statistics_follow_growth_on_every_sqlite(tmp_path):
+    # The write path's own rule, never PRAGMA optimize's version-specific one (SQLite < 3.46
+    # never analyzed a fresh table, so CI kept no statistics): the first write analyzes, a
+    # write that leaves the table ~10x its analyzed size re-analyzes, a small one does not.
+    db = str(tmp_path / "grow.db")
+    cap = SQLiteGraphCapability()
+    cap.initialize({"db_path": db})
+
+    def analyzed_rows():
+        stats = sqlite3.connect(db).execute(
+            "SELECT stat FROM sqlite_stat1 WHERE tbl = 'nodes' AND idx = 'idx_nodes_label_id'").fetchone()
+        return int(stats[0].split()[0])
+
+    cap.add_nodes([GraphNode(id=f"a{i:03d}", label="Doc", properties={}) for i in range(5)])
+    assert analyzed_rows() == 5
+    cap.add_nodes([GraphNode(id=f"b{i:03d}", label="Doc", properties={}) for i in range(10)])
+    assert analyzed_rows() == 5      # 15 rows: under 10x, the statistics stand
+    cap.add_nodes([GraphNode(id=f"c{i:03d}", label="Doc", properties={}) for i in range(40)])
+    assert analyzed_rows() == 55     # 55 rows: 10x the analyzed 5, re-analyzed
+    cap.cleanup()
 
 
 def test_typed_surface_smoke(cap):
