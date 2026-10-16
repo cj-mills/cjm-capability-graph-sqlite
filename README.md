@@ -19,10 +19,12 @@ A local, file-backed context-graph storage capability for the cjm-substrate runt
 - `explain_query` _function_ — The planner's answer for a typed query, without running it -- the instrument's plan
 - `ingest_sources` _function_ — The source HEADs this db was ingested from, on a fresh read-only connection. A db built
 - `integrity_check` _function_ — Backend self-check (stage 4; the G3 corruption find institutionalized):
+- `journal_cursors` _function_ — This db's applied cursors, on a fresh read-only connection. A db built before the table
 - `query_edges` _function_ — Execute a typed edge query (stage 4) — same contract as `query_nodes`.
 - `query_nodes` _function_ — Execute a typed node query (stage 4) — translated to parameterized SQL
 - `raw_query` _function_ — Execute the raw escape — refuses backend mismatches (non-portable by
 - `record_ingest_sources` _function_ — Record the source HEADs this db was ingested from, REPLACING any earlier record
+- `record_journal_cursor` _function_ — Record how far into one journal family this db has applied, REPLACING that family's
 
 ### `cjm_capability_graph_sqlite.query_translation`
 

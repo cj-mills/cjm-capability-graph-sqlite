@@ -337,6 +337,36 @@ def test_ingest_record_replaces_reads_readonly_and_tolerates_a_legacy_db(cap, tm
     old.cleanup()
 
 
+def test_journal_cursors_upsert_per_family_read_readonly_and_tolerate_a_legacy_db(cap, tmp_path):
+    """The applied cursors (design detail 65f4a6c9 (2c)): one per family, replaced on each
+    record; beside the graph (no row); readable through a read-only open; a db built before the
+    table existed reads as holding none."""
+    assert cap.journal_cursors() == {}
+    first = {"segment": 1, "offset": 120, "ordinal": 2, "digest": "a" * 64}
+    later = {"segment": 3, "offset": 40, "ordinal": 9, "digest": "b" * 64}
+    assert cap.record_journal_cursor("w.writes.jsonl", first)
+    assert cap.record_journal_cursor("w.memory.jsonl", first)
+    assert cap.record_journal_cursor("w.writes.jsonl", later)
+    assert cap.journal_cursors() == {"w.memory.jsonl": first, "w.writes.jsonl": later}
+    assert cap.get_schema()["counts"] == {}  # beside the graph, never in it
+
+    ro = SQLiteGraphCapability()
+    ro.initialize({"db_path": cap._db_path, "readonly": True})
+    assert ro.journal_cursors()["w.writes.jsonl"] == later
+    ro.cleanup()
+
+    legacy = str(tmp_path / "legacy.db")
+    con = sqlite3.connect(legacy)
+    con.execute("CREATE TABLE nodes (id TEXT PRIMARY KEY, label TEXT NOT NULL, properties JSON, "
+                "sources JSON, created_at REAL, updated_at REAL)")
+    con.commit()
+    con.close()
+    old = SQLiteGraphCapability()
+    old.initialize({"db_path": legacy, "readonly": True})
+    assert old.journal_cursors() == {}
+    old.cleanup()
+
+
 def test_explain_names_the_whole_reads_and_runs_nothing(cap):
     # The plan guard's seam (design detail 3bd8673d): a query's plan without running it --
     # a table SCAN, a label range filtered row by row, and the selective reads that are neither

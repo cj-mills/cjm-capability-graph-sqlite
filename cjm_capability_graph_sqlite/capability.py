@@ -232,6 +232,17 @@ class SQLiteGraphCapability(ToolCapability):
                     head TEXT NOT NULL
                 )
             """)
+            # The applied cursors (design detail 65f4a6c9 (2c)): how far into each journal family
+            # this db has applied -- beside the graph like the ingest record, never in it.
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS journal_cursors (
+                    family TEXT PRIMARY KEY,
+                    segment INTEGER NOT NULL,
+                    byte_offset INTEGER NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    digest TEXT NOT NULL
+                )
+            """)
             # H7 companion: planner statistics. Without sqlite_stat1 the
             # correlated-probe plans pick the WRONG composite index (the
             # target-side probe scans a whole document's PART_OF rows per
@@ -1005,6 +1016,41 @@ def ingest_sources(self) -> Dict[str, str]:  # source id -> HEAD; {} when the db
     return {s: h for s, h in rows}
 
 
+def record_journal_cursor(
+    self,
+    family: str,               # The journal family (its live tail's file name)
+    position: Dict[str, Any],  # {segment, offset, ordinal, digest}: just past the last record applied
+) -> bool:  # True once recorded
+    """Record how far into one journal family this db has applied, REPLACING that family's
+    earlier cursor (design detail 65f4a6c9 (2c)). A writer advances it after each apply and a
+    rebuild stamps it at its close. Beside the graph like the ingest record: neither stamped by the
+    op clock nor seen by the write observer, never a node."""
+    row = (str(family), int(position["segment"]), int(position["offset"]),
+           int(position["ordinal"]), str(position["digest"]))
+    with self._writing() as con:
+        con.execute("INSERT INTO journal_cursors (family, segment, byte_offset, ordinal, digest) "
+                    "VALUES (?, ?, ?, ?, ?) ON CONFLICT(family) DO UPDATE SET "
+                    "segment = excluded.segment, byte_offset = excluded.byte_offset, "
+                    "ordinal = excluded.ordinal, digest = excluded.digest", row)
+    return True
+
+
+def journal_cursors(self) -> Dict[str, Dict[str, Any]]:  # family -> {segment, offset, ordinal, digest}; {} when none
+    """This db's applied cursors, on a fresh read-only connection. A db built before the table
+    existed reads as holding none, never as an error."""
+    con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+    try:
+        rows = con.execute("SELECT family, segment, byte_offset, ordinal, digest "
+                           "FROM journal_cursors ORDER BY family").fetchall()
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e):
+            raise
+        rows = []
+    finally:
+        con.close()
+    return {f: {"segment": s, "offset": o, "ordinal": n, "digest": d} for f, s, o, n, d in rows}
+
+
 def explain_query(
     self,
     query: Union[NodeQuery, EdgeQuery],  # The typed query to plan (never run)
@@ -1043,4 +1089,6 @@ SQLiteGraphCapability.raw_query = raw_query
 SQLiteGraphCapability.integrity_check = integrity_check
 SQLiteGraphCapability.record_ingest_sources = record_ingest_sources
 SQLiteGraphCapability.ingest_sources = ingest_sources
+SQLiteGraphCapability.record_journal_cursor = record_journal_cursor
+SQLiteGraphCapability.journal_cursors = journal_cursors
 SQLiteGraphCapability.explain_query = explain_query
